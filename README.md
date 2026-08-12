@@ -31,6 +31,32 @@ python -m ledger.cli append agent.log.jsonl '{"tool":"search","ok":true}'
 python -m ledger.cli verify agent.log.jsonl        # exit 0 = intact, 1 = broken
 ```
 
+## Prove *who* acted, not just the order
+
+A hash chain proves sequence integrity — it can't prove who wrote each entry or
+whether they were allowed to. Attach an `authority` block to bind the actor and
+their permission surface into the chained (tamper-evident) row:
+
+```python
+from ledger import Ledger, authority
+
+log = Ledger("agent.log.jsonl")
+log.append(
+    {"tool": "payment", "amount": "49.00"},
+    authority=authority(
+        "agent://billing-7",
+        capability_version="v3",              # what they were allowed to do
+        tool_schema={"name": "payment", "args": ["amount"]},  # hashed, not just named
+        time_source="ntp",                    # trust surface of the clock
+    ),
+)
+```
+
+Now the audit question sharpens from *"was this edited?"* to *"was this edited
+**and** was the writer authorized?"* — editing the principal, capability, or
+schema hash breaks the chain like any other tamper. This composes tamper-evidence
+with permission-replay. (Shipped in response to community feedback on launch.)
+
 ## Why this exists
 
 The loudest unmet pain for agent builders in 2026 is the reliability/audit gap:

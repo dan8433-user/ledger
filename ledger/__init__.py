@@ -24,8 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-__version__ = "0.1.0"
-__all__ = ["Ledger", "VerifyResult", "verify_file"]
+__version__ = "0.2.0"
+__all__ = ["Ledger", "VerifyResult", "verify_file", "authority"]
 
 _GENESIS = "genesis"
 _CHAIN_LEN = 32  # first N hex chars of the sha256 — plenty for tamper-evidence
@@ -40,6 +40,32 @@ def _chain(prev: str, obj: dict) -> str:
     body = json.dumps({k: v for k, v in obj.items() if k != "chain"},
                       ensure_ascii=False, sort_keys=True)
     return hashlib.sha256((prev + body).encode("utf-8")).hexdigest()[:_CHAIN_LEN]
+
+
+def authority(principal: str, *, capability_version: str | None = None,
+              tool_schema: Any = None, time_source: str = "local") -> dict:
+    """Build an `authority` block for an entry: WHO acted, with what authority.
+
+    A hash chain proves ORDER, not who wrote each entry or whether they were
+    allowed to. Attaching this block makes the audit question sharper — "was
+    this edited?" becomes "was this edited AND was the writer authorized?" —
+    and lets tamper-evidence compose with permission-replay. (Requested by the
+    community on launch, 2026-08-12.)
+
+    - principal: the resolved actor (agent id, user, service).
+    - capability_version: the version of the permission/capability set in force.
+    - tool_schema: the tool's schema/signature — HASHED, so you bind what the
+      tool looked like at call time, not just its name.
+    - time_source: where the timestamp came from (e.g. "local", "ntp", an
+      external attestation id). Names the trust surface of the clock.
+    """
+    block: dict[str, Any] = {"principal": principal, "time_source": time_source}
+    if capability_version is not None:
+        block["capability_version"] = capability_version
+    if tool_schema is not None:
+        canon = json.dumps(tool_schema, ensure_ascii=False, sort_keys=True)
+        block["tool_schema_hash"] = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
+    return block
 
 
 @dataclass
@@ -61,14 +87,21 @@ class Ledger:
         self.path = Path(path)
 
     # -- write --------------------------------------------------------------
-    def append(self, record: dict[str, Any]) -> str:
+    def append(self, record: dict[str, Any], *, authority: dict | None = None) -> str:
         """Append one record; returns its chain hash. Stamps `ts` if absent.
+
+        Pass `authority=` (build it with the module-level `authority()` helper)
+        to bind WHO wrote the entry and with what permission — it becomes part
+        of the chained, tamper-evident row, so the authority surface is proven
+        alongside the order.
 
         Atomic: append-binary + flush + fsync, so a crash mid-write never
         corrupts the file (a partial line fails to parse and is caught by
         verify, it never silently poisons the chain).
         """
         obj = dict(record)
+        if authority is not None:
+            obj["authority"] = authority
         obj.setdefault("ts", _now_iso())
         obj.pop("chain", None)
         obj["chain"] = _chain(self._last_chain(), obj)

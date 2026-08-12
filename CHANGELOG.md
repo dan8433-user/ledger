@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0 — 2026-08-12
+- Added `authority()` helper + `append(..., authority=...)`: bind WHO wrote each entry and with what permission (resolved principal, capability version, hashed tool schema, trusted time source). It chains like any field, so editing the writer identity breaks the chain too. Composes tamper-evidence with permission-replay. Shipped same-day in response to community feedback on launch.
+
+
 ## 0.1.0 — 2026-08-12
 - Initial release. Zero-dependency tamper-evident, hash-chained action log for AI agents.
 - Core library: `Ledger(path).append(record)` and `.verify()`; module `verify_file(path)`.
