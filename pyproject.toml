@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ledger-agent"
+version = "0.1.0"
+description = "Tamper-evident, hash-chained action log for AI agents. Prove what your agent did."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Arcaeon" }]
+keywords = ["ai", "agents", "mcp", "audit", "tamper-evident", "provenance", "hash-chain"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Intended Audience :: Developers",
+  "Topic :: Software Development :: Libraries",
+]
+dependencies = []
+
+[project.scripts]
+ledger = "ledger.cli:main"
+
+[project.urls]
+Homepage = "https://arcaeon.io"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ledger"]
