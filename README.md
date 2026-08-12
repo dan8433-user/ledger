@@ -7,6 +7,10 @@ reorder history, and every later link breaks — `verify` names the exact line.
 You own the record, and you can prove it wasn't altered. Zero dependencies, one
 JSONL file, two verbs.
 
+```
+pip install arcaeon-ledger
+```
+
 ```python
 from ledger import Ledger
 
