@@ -1,6 +1,6 @@
-# ledger
+# arcaeon-ledger
 
-**Observability tools show you what your agent did. `ledger` lets you _prove_ it.**
+**Observability tools show you what your agent did. `arcaeon-ledger` lets you _prove_ it.**
 
 Every record is hash-chained to the one before it. Edit a row, delete one, or
 reorder history, and every later link breaks — `verify` names the exact line.
@@ -8,11 +8,11 @@ You own the record, and you can prove it wasn't altered. Zero dependencies, one
 JSONL file, two verbs.
 
 ```
-pip install arcaeon-ledger
+pip install arcaeon-ledger      # then:  from arcaeon_ledger import Ledger
 ```
 
 ```python
-from ledger import Ledger
+from arcaeon_ledger import Ledger
 
 log = Ledger("agent.log.jsonl")
 log.append({"tool": "web.search", "query": "weather in LA", "result_ok": True})
@@ -31,8 +31,8 @@ log.verify()          # VerifyResult(ok=False, first_break="line 1: chain mismat
 CLI (wire it into CI or a pre-ship gate — a tampered log exits nonzero):
 
 ```
-python -m ledger.cli append agent.log.jsonl '{"tool":"search","ok":true}'
-python -m ledger.cli verify agent.log.jsonl        # exit 0 = intact, 1 = broken
+python -m arcaeon_ledger.cli append agent.log.jsonl '{"tool":"search","ok":true}'
+python -m arcaeon_ledger.cli verify agent.log.jsonl        # exit 0 = intact, 1 = broken
 ```
 
 ## Prove *who* acted, not just the order
@@ -42,7 +42,7 @@ whether they were allowed to. Attach an `authority` block to bind the actor and
 their permission surface into the chained (tamper-evident) row:
 
 ```python
-from ledger import Ledger, authority
+from arcaeon_ledger import Ledger, authority
 
 log = Ledger("agent.log.jsonl")
 log.append(
@@ -68,7 +68,7 @@ an agent "completes" a task and the result is quietly wrong, and you can't
 reconstruct — or prove — what actually happened. Observability platforms trace
 runs; none give you a **tamper-evident, portable, ownable** record. Regulations
 (EU AI Act Art. 12, tamper-evident AI decision records) are starting to require
-exactly this. `ledger` is the smallest honest version: a cryptographically
+exactly this. `arcaeon-ledger` is the smallest honest version: a cryptographically
 chained action log you drop in, own, and verify.
 
 ## How the chain works
@@ -82,16 +82,42 @@ appearing *after* the chain begins is itself flagged. On a mismatch, verify
 keeps going from the claimed value so it counts later damage honestly instead of
 cascading one break into noise.
 
-The honest limit: `ledger` proves a file wasn't altered *after* writing. It does
-not prove the writer was honest at write time, and it does not by itself defend
-against someone who rewrites the whole chain from a chosen point forward — for
-that you periodically anchor the latest chain value somewhere you don't control
-(a commit, a timestamp service, a witness). That anchoring is on the roadmap;
-the core tamper-evidence is here and tested.
+## What it proves — and the three things it doesn't
+
+Being precise here is the product, not a disclaimer. A hash chain proves the
+recorded bytes were not altered *in place* after writing: mid-file edit, delete,
+and reorder all break it and `verify` names the row. It does **not** by itself
+prove three other things:
+
+**1. Truncation.** Lop off the most recent rows and what remains verifies clean —
+no append-only chain catches this alone. Close it by publishing the head somewhere
+outside your own control, on a cadence:
+
+```python
+pin = log.head().as_pin()
+# -> "arcaeon-ledger head chain=9f3c… rows=204 as_of=2026-08-13T17:40:00Z"
+# post `pin` to a git commit / public comment / notarization anchor.
+# a reader compares a fresh head() against the last pin; a truncated or
+# re-minted history disagrees. the MAX gap between pins is your security
+# parameter, not the average — an attacker picks the gap.
+```
+
+**2. Truth.** The chain notarizes whatever was written — a tamper-evident record
+of a hallucination is still a hallucination with a checksum. To make a row speak
+about the world, hash a re-fetchable artefact (URL+bytes, a snapshot, tool stdout)
+and store that digest in the row, so a third party can re-get it and compare.
+
+**3. Authorship.** `authority()` (above) records who-claimed-what, but it is data
+in the row, not a signature — a rewriter who re-mints from genesis re-mints it too.
+External head-anchoring (#1) is the thing a re-minter cannot advance.
+
+Scoped honestly, the primitive is *"this file was not rewritten in place"* — small,
+true, and testable. The layers above (external anchoring via `head()`, artefact
+binding, signed authorship) are how you extend it toward a full evidence claim.
 
 ## Drop it into any MCP agent
 
-`ledger` ships a zero-dependency MCP server, so any MCP client (Claude Code,
+`arcaeon-ledger` ships a zero-dependency MCP server, so any MCP client (Claude Code,
 etc.) can give its agent tamper-evident logging with no code. Wire it in:
 
 ```json
@@ -99,7 +125,7 @@ etc.) can give its agent tamper-evident logging with no code. Wire it in:
   "mcpServers": {
     "ledger": {
       "command": "python",
-      "args": ["-m", "ledger.mcp_server", "--log", "agent.log.jsonl"]
+      "args": ["-m", "arcaeon_ledger.mcp_server", "--log", "agent.log.jsonl"]
     }
   }
 }
@@ -116,7 +142,8 @@ Core library, CLI, and a drop-in **MCP server**, all tested: the library
 against edit / delete / reorder tampering (`test_ledger.py`), the MCP server
 through a full initialize → tools/list → append → verify handshake including
 tamper detection over the wire. Extracted from a hash-chained action ledger
-running in production. A hosted collection tier (retention + compliance export)
-and periodic external anchoring are the next layers.
+running in production. External anchoring ships now via `head()` (publish the pin
+yourself); a hosted collection tier (retention, an automatic witness, compliance
+export) is the next layer.
 
 MIT.

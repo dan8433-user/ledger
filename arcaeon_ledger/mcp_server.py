@@ -7,10 +7,10 @@ client (Claude Code, etc.) can wire it in and its agent gets two tools:
   ledger_append(record)  -> chain hash   (log an action, tamper-evidently)
   ledger_verify()        -> verify result (prove the log wasn't altered)
 
-Run:  python -m ledger.mcp_server [--log PATH]
+Run:  python -m arcaeon_ledger.mcp_server [--log PATH]
 Wire into an MCP client (e.g. Claude Code .mcp.json):
   { "mcpServers": { "ledger": {
-      "command": "python", "args": ["-m", "ledger.mcp_server", "--log", "agent.log.jsonl"] } } }
+      "command": "python", "args": ["-m", "arcaeon_ledger.mcp_server", "--log", "agent.log.jsonl"] } } }
 
 Implements the slice of MCP a tool server needs: initialize, tools/list,
 tools/call. Protocol version 2025-06-18. Notifications are ignored (no id).
@@ -21,7 +21,7 @@ import argparse
 import json
 import sys
 
-from ledger import Ledger
+from arcaeon_ledger import Ledger
 
 PROTOCOL_VERSION = "2025-06-18"
 

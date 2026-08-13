@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arcaeon-ledger"
-version = "0.2.0"
+version = "0.2.1"
 description = "Tamper-evident, hash-chained action log for AI agents. Prove what your agent did."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,10 +20,10 @@ classifiers = [
 dependencies = []
 
 [project.scripts]
-ledger = "ledger.cli:main"
+arcaeon-ledger = "arcaeon_ledger.cli:main"
 
 [project.urls]
 Homepage = "https://arcaeon.io"
 
 [tool.hatch.build.targets.wheel]
-packages = ["ledger"]
+packages = ["arcaeon_ledger"]

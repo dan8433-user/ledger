@@ -1,16 +1,32 @@
-"""ledger — a tamper-evident, append-only action log for AI agents.
+"""arcaeon_ledger — a tamper-evident, append-only action log for AI agents.
 
-Observability tools show you what your agent did. `ledger` lets you PROVE it:
-every record is hash-chained to the one before it, so an edit, deletion, or
-reorder anywhere in the history breaks every later link and `verify()` names the
-exact line. Own the record; prove it wasn't altered.
+Observability tools show you what your agent did. `arcaeon_ledger` lets you
+PROVE it: every record is hash-chained to the one before it, so an edit,
+deletion, or reorder in the middle of the history breaks every later link and
+`verify()` names the exact line. Own the record; prove it wasn't altered.
 
 Zero dependencies (stdlib only). One JSONL file. Two verbs: append, verify.
 
-    from ledger import Ledger
+    from arcaeon_ledger import Ledger
     log = Ledger("agent.log.jsonl")
     log.append({"tool": "search", "query": "weather", "result_ok": True})
     log.verify()          # -> VerifyResult(ok=True, rows=1, ...)
+
+WHAT IT PROVES, AND WHAT IT DOESN'T. A hash chain proves the recorded bytes were
+not altered *in place* after they were written — mid-file edit, delete, reorder
+all break it. It does NOT, by itself, prove three other things, and honesty
+about the boundary is the point:
+  - Truncation: lop off the most recent rows and what remains verifies clean.
+    No append-only chain catches this alone. Close it by publishing the head
+    (see `Ledger.head()`) somewhere outside your own control, on a cadence — an
+    external witness that holds the head at time T makes any later rewrite that
+    both differs and still verifies impossible.
+  - Truth: the chain notarizes whatever was written, true or hallucinated. To
+    bind a row to a re-fetchable fact, hash the artefact (URL+bytes, snapshot,
+    tool stdout) and store the digest in the row.
+  - Authorship: `authority()` records who-claimed-what, but it is data in the
+    row, not a signature. A rewriter who re-mints from genesis can re-mint it
+    too. External head-anchoring is what a re-minter cannot advance.
 
 Extracted from a hash-chained action ledger running in production. MIT.
 """
@@ -24,8 +40,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-__version__ = "0.2.0"
-__all__ = ["Ledger", "VerifyResult", "verify_file", "authority"]
+__version__ = "0.2.1"
+__all__ = ["Ledger", "VerifyResult", "verify_file", "authority", "Head"]
 
 _GENESIS = "genesis"
 _CHAIN_LEN = 32  # first N hex chars of the sha256 — plenty for tamper-evidence
@@ -78,6 +94,25 @@ class VerifyResult:
 
     def __bool__(self) -> bool:  # `if log.verify(): ...`
         return self.ok
+
+
+@dataclass
+class Head:
+    """A publishable pin of a log's current tip: chain head + row count + time.
+
+    This is what you post somewhere OUTSIDE your own control (a git commit, a
+    public comment, a notarization service) to close the truncation gap. Once a
+    third party has recorded (chain, rows) at time `as_of`, no later rewrite can
+    produce a log that both differs from that pin and still verifies — a
+    truncated or re-minted history will disagree with the pinned head.
+    """
+    chain: str
+    rows: int
+    as_of: str
+
+    def as_pin(self) -> str:
+        """One-line, copy-pasteable pin string for publishing externally."""
+        return f"arcaeon-ledger head chain={self.chain} rows={self.rows} as_of={self.as_of}"
 
 
 class Ledger:
@@ -153,6 +188,21 @@ class Ledger:
     # -- verify -------------------------------------------------------------
     def verify(self) -> VerifyResult:
         return verify_file(self.path)
+
+    # -- external anchoring -------------------------------------------------
+    def head(self) -> Head:
+        """Current tip of the log — publish this OUTSIDE your control to close
+        the truncation gap.
+
+        Returns the last row's chain value, the verified row count, and a
+        timestamp. Post `head().as_pin()` somewhere a rewriter can't reach (a
+        git commit, a public comment, a notarization anchor) on a cadence; a
+        reader then checks a fresh `head()` against the last pin — a truncated
+        or re-minted history disagrees. The max gap between pins is your real
+        security parameter, not the average, because an attacker picks the gap.
+        """
+        res = verify_file(self.path)
+        return Head(chain=self._last_chain(), rows=res.rows, as_of=_now_iso())
 
 
 def verify_file(path: str | Path) -> VerifyResult:

@@ -1,7 +1,7 @@
 """ledger CLI — verify or append from the command line.
 
-    python -m ledger.cli verify agent.log.jsonl
-    python -m ledger.cli append agent.log.jsonl '{"tool":"search","ok":true}'
+    python -m arcaeon_ledger.cli verify agent.log.jsonl
+    python -m arcaeon_ledger.cli append agent.log.jsonl '{"tool":"search","ok":true}'
 
 Exit code 0 = chain intact, 1 = broken (or bad usage). The nonzero exit is the
 point: wire `verify` into CI or a pre-ship gate and a tampered log fails loud.
@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sys
 
-from ledger import Ledger, verify_file
+from arcaeon_ledger import Ledger, verify_file
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -6,7 +6,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from ledger import Ledger
+from arcaeon_ledger import Ledger
 
 
 def test_append_and_verify_clean():
@@ -67,7 +67,7 @@ def test_reorder_is_caught():
 
 
 def test_authority_block_is_chained():
-    from ledger import authority
+    from arcaeon_ledger import authority
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "auth.jsonl"
         log = Ledger(p)
@@ -88,10 +88,36 @@ def test_authority_block_is_chained():
     print("PASS authority block chained + tamper-protected")
 
 
+def test_truncation_verifies_clean_but_head_pin_catches_it():
+    """The honest limit, made a test: chop the tail and the remainder still
+    verifies — but a previously-published head() pin disagrees. This is what
+    external anchoring buys, and why head() exists."""
+    from arcaeon_ledger import Head
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "trunc.jsonl"
+        log = Ledger(p)
+        for i in range(6):
+            log.append({"event": i})
+        pin = log.head()                      # published externally at full height
+        assert isinstance(pin, Head) and pin.rows == 6
+        assert pin.as_pin().startswith("arcaeon-ledger head chain=")
+        # Truncate: drop the last two rows.
+        lines = p.read_text(encoding="utf-8").splitlines()
+        p.write_text("\n".join(lines[:-2]) + "\n", encoding="utf-8")
+        # The chain alone can't see it — remainder is internally perfect:
+        assert log.verify().ok, "truncated remainder should still self-verify"
+        # But the external pin catches it: fresh head disagrees with what was published.
+        now = log.head()
+        assert now.rows == 4 and now.chain != pin.chain, (now, pin)
+    print("PASS truncation is invisible to verify() but caught by a published head() pin")
+
+
 if __name__ == "__main__":
     test_append_and_verify_clean()
     test_tamper_edit_is_caught()
     test_delete_row_is_caught()
     test_reorder_is_caught()
     test_authority_block_is_chained()
-    print("\nALL PASS — tamper-evidence holds against edit, delete, and reorder.")
+    test_truncation_verifies_clean_but_head_pin_catches_it()
+    print("\nALL PASS — tamper-evidence holds against edit, delete, reorder; "
+          "truncation is documented honestly and caught by head() anchoring.")
