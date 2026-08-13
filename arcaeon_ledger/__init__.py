@@ -40,8 +40,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-__version__ = "0.2.1"
-__all__ = ["Ledger", "VerifyResult", "verify_file", "authority", "Head"]
+__version__ = "0.3.0"
+__all__ = ["Ledger", "VerifyResult", "verify_file", "authority", "Head",
+           "bind_artefact", "verify_artefact", "digest_bytes", "digest_json"]
+
+from arcaeon_ledger.artefact import (  # noqa: E402  (kept after __all__ for readability)
+    bind_artefact, verify_artefact, digest_bytes, digest_json,
+)
 
 _GENESIS = "genesis"
 _CHAIN_LEN = 32  # first N hex chars of the sha256 — plenty for tamper-evidence

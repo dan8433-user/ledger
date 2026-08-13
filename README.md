@@ -115,6 +115,50 @@ Scoped honestly, the primitive is *"this file was not rewritten in place"* — s
 true, and testable. The layers above (external anchoring via `head()`, artefact
 binding, signed authorship) are how you extend it toward a full evidence claim.
 
+## Bind what the agent actually read (artefact-binding)
+
+The chain proves a row wasn't edited. It does **not** prove the row was ever *true* —
+it will notarize a hallucination as faithfully as a fact. `bind_artefact` closes
+that gap for the cases where you can point at a re-fetchable source: hash the actual
+bytes the agent read and store that digest *in* the row, so a third party can
+re-get the source and compare.
+
+```python
+from arcaeon_ledger import Ledger, bind_artefact
+
+log = Ledger("agent.log.jsonl")
+art = bind_artefact("https://example.com/pricing")   # or bytes, a file path, or a dict
+log.append({"tool": "web.read", "url": "https://example.com/pricing", "artefact": art})
+# art -> {"subject": {"name": "...", "digest": {"sha256": "..."}},
+#         "recipe": "sha256:raw-bytes:v1",
+#         "digest": "sha256:raw-bytes:v1:<hex>", "bound_at": "...", "source_meta": {...}}
+```
+
+Digests are **self-describing** — never a bare hex hash. Each one is
+`sha256:<recipe>:<version>:<hex>`, carrying its own recipe so a stranger reproduces
+it from the string alone: `raw-bytes:v1` (opaque bytes as-read) or `json-c14n:v1`
+(a pinned, documented JSON canonicalization — sorted keys, compact, UTF-8). Recipes
+are frozen and versioned append-only, so old rows keep their recipe forever and a
+changed rule never makes history look tampered.
+
+Verify honestly:
+
+```python
+from arcaeon_ledger import verify_artefact
+
+verify_artefact(art)                    # digest string well-formed + self-consistent
+verify_artefact(art, refetch=True)      # for a URL: re-fetch and compare
+# -> {"digest_ok": True, "refetch": "match" | "mismatch" | "unavailable", "notes": [...]}
+```
+
+**The honest boundary, stated loudly because it is the point:** a re-fetch
+`mismatch` means the content *changed or* was tampered — **indeterminate**. It is
+never reported as proof of tampering. The web mutates, 404s, paywalls, and
+personalizes; binding proves *"this is the digest of the bytes the agent said it
+read at time T,"* nothing stronger. For a neutral capture rather than your own
+fetch, route the source through a notarizing snapshot; for *existed-before-T*, anchor
+the digest externally. Each is a layer you add — stated, not implied.
+
 ## Drop it into any MCP agent
 
 `arcaeon-ledger` ships a zero-dependency MCP server, so any MCP client (Claude Code,
