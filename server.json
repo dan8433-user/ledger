@@ -1,0 +1,33 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.arcaeon/ledger",
+  "title": "Arcaeon Ledger",
+  "description": "Tamper-evident action logging for agents: hash-chained append/verify, one JSONL file, zero deps.",
+  "version": "0.5.1",
+  "websiteUrl": "https://arcaeon.io/ai",
+  "repository": {
+    "url": "https://github.com/dan8433-user/ledger",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "arcaeon-ledger",
+      "version": "0.5.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--log",
+          "description": "Path of the ledger file to append to and verify (default: agent.log.jsonl)",
+          "isRequired": false,
+          "format": "string",
+          "value": "agent.log.jsonl"
+        }
+      ]
+    }
+  ]
+}
