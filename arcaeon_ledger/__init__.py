@@ -40,13 +40,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-__version__ = "0.3.0"
-__all__ = ["Ledger", "VerifyResult", "verify_file", "authority", "Head",
-           "bind_artefact", "verify_artefact", "digest_bytes", "digest_json"]
-
-from arcaeon_ledger.artefact import (  # noqa: E402  (kept after __all__ for readability)
-    bind_artefact, verify_artefact, digest_bytes, digest_json,
-)
+__version__ = "0.4.0"
+__all__ = ["Ledger", "VerifyResult", "verify_file", "chain_at", "authority", "Head",
+           "bind_artefact", "verify_artefact", "digest_bytes", "digest_json",
+           "WitnessStore", "publish_head", "verify_against_witness", "WitnessVerdict"]
 
 _GENESIS = "genesis"
 _CHAIN_LEN = 32  # first N hex chars of the sha256 — plenty for tamper-evidence
@@ -210,6 +207,37 @@ class Ledger:
         return Head(chain=self._last_chain(), rows=res.rows, as_of=_now_iso())
 
 
+def chain_at(path: str | Path, n: int) -> str | None:
+    """The chain value of the n-th row (1-indexed, by total parseable rows —
+    matching Head.rows), or None if the file has fewer than n rows or that row
+    carries no chain.
+
+    Used to check a log against an external witness pin taken at row n: the pin
+    records (rows, chain) at time T; `chain_at(path, pin.rows)` recomputes what
+    this log now says at that same row, so a later truncation (fewer rows) or
+    rewrite (different chain) is detectable against the outside record.
+    """
+    if n <= 0:
+        return _GENESIS
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    count = 0
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            continue
+        count += 1
+        if count == n:
+            return obj.get("chain")
+    return None
+
+
 def verify_file(path: str | Path) -> VerifyResult:
     """Recompute the chain over a file; report the first break by line number.
 
@@ -250,3 +278,15 @@ def verify_file(path: str | Path) -> VerifyResult:
         prev = claimed
         res.chained += 1
     return res
+
+
+# Sub-module re-exports. Placed at the END, after Ledger/Head/chain_at/verify_file
+# are defined, because arcaeon_ledger.witness imports those names back from this
+# package — importing the sub-modules earlier would hit a partially-initialized
+# module and fail. artefact has no such dependency but is kept here for symmetry.
+from arcaeon_ledger.artefact import (  # noqa: E402
+    bind_artefact, verify_artefact, digest_bytes, digest_json,
+)
+from arcaeon_ledger.witness import (  # noqa: E402
+    WitnessStore, publish_head, verify_against_witness, WitnessVerdict,
+)

@@ -159,6 +159,46 @@ read at time T,"* nothing stronger. For a neutral capture rather than your own
 fetch, route the source through a notarizing snapshot; for *existed-before-T*, anchor
 the digest externally. Each is a layer you add — stated, not implied.
 
+## The outside check: an external witness
+
+The chain can't catch truncation alone — lop off the most recent rows and what
+remains verifies clean (stated in "what it doesn't prove", above). The fix is a
+**witness**: a record-keeper outside your own control that holds your head
+`(rows, chain)` on a cadence. Once a witness has a pin from time T, a truncated
+log has *fewer rows* than the witness saw, and a rewritten one has a *different
+chain* at the witnessed row. Neither can hide.
+
+```python
+from arcaeon_ledger import Ledger, WitnessStore, publish_head, verify_against_witness
+
+log = Ledger("agent.log.jsonl")
+witness = WitnessStore("witness_pins.jsonl")   # ideally on a host you don't control
+
+publish_head(witness, "billing-agent", log)    # record the current head — do this on a cadence
+
+# later — did the log survive intact?
+v = verify_against_witness(witness, "billing-agent", log)
+v.verdict     # "consistent" | "truncated" | "rewritten" | "no_record"
+bool(v)       # truthy ONLY on "consistent" — a missing pin is no_record, never a false ok
+```
+
+`WitnessStore` is the reference witness: one append-only JSONL file of pins. A
+hosted witness is a thin HTTP wrapper over exactly this object; run it locally
+and you have a complete, offline, zero-cost witness you fully control (with the
+obvious caveat that a witness you control is only as independent as its host).
+
+**What this proves, exactly.** A witness proves your log wasn't truncated or
+rewritten *only relative to what the witness saw, and only as recently as the
+last pin*. Rows appended after the last pin are unprotected until the next one —
+so **the MAX gap between pins is your real security parameter, not the average,
+because an attacker picks the gap.** And it says nothing about whether the logged
+content was *true* — that's artefact-binding's job (above); the witness only
+guards the history's shape.
+
+**What the witness holds.** Only fingerprints — `(namespace, rows, chain, time)` —
+never your log content. Password-nowhere by design: if the witness is breached,
+there is nothing sensitive to steal, only hashes useless without the original log.
+
 ## Drop it into any MCP agent
 
 `arcaeon-ledger` ships a zero-dependency MCP server, so any MCP client (Claude Code,
@@ -186,8 +226,8 @@ Core library, CLI, and a drop-in **MCP server**, all tested: the library
 against edit / delete / reorder tampering (`test_ledger.py`), the MCP server
 through a full initialize → tools/list → append → verify handshake including
 tamper detection over the wire. Extracted from a hash-chained action ledger
-running in production. External anchoring ships now via `head()` (publish the pin
-yourself); a hosted collection tier (retention, an automatic witness, compliance
-export) is the next layer.
+running in production. External anchoring ships via `head()` (publish the pin
+yourself) and the reference witness (`WitnessStore`, above); a hosted witness
+tier (retention, automatic pin cadence, compliance export) is the next layer.
 
 MIT.
