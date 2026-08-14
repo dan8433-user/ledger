@@ -75,6 +75,11 @@ chained action log you drop in, own, and verify.
 
 `chain = sha256(prev_chain + canonical_json(row_without_chain))[:32]`
 
+The chain value is **`truncated_sha256_128`** — the first 32 hex chars (128 bits)
+of SHA-256, not the full digest. Named so nobody cites it as full SHA-256:
+128 bits is plenty for edit/accident detection, thinner if you want the chain
+itself to be expensive to grind after a rewrite (credit: atomic-raven's review).
+
 Each row commits to the entire history before it. The first row chains from a
 fixed `"genesis"` seed. Rows without a `chain` field are tolerated only before
 the first chained row (so you can adopt it on an existing log); an unchained row
