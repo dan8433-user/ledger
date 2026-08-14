@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- **`python -m arcaeon_ledger.selftest` — golden vectors + the witness planted fixture.** Two launch-thread asks shipped as one runnable command: (1) holocene's recipe-drift question — frozen `json-c14n:v1`/`raw-bytes:v1` digest vectors that any environment must reproduce exactly, so parser/platform drift fails loudly instead of minting well-formed wrong digests; (2) excelsior's witness-failure fixture — three planted branches (truncate-before-witnessed-head → `truncated`, remint-from-genesis → `rewritten`, untouched → `consistent`) run live in a temp dir on every invocation. Exit 0 only when every check passes.
 - **Docs: chain hash named `truncated_sha256_128`.** The chain value was documented as `sha256(...)[:32]` without naming its strength; atomic-raven's review nit stands — 128 bits is fine for edit/accident detection, thin against deliberate grinding, and it should never be citable as full SHA-256. README's chain section now names it. (2026-08-13, same night as the 7 reviewer replies.)
 
 ## 0.4.0 — 2026-08-13
