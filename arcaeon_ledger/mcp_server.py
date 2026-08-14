@@ -21,7 +21,7 @@ import argparse
 import json
 import sys
 
-from arcaeon_ledger import Ledger
+from arcaeon_ledger import Ledger, __version__
 
 PROTOCOL_VERSION = "2025-06-18"
 
@@ -78,7 +78,7 @@ def handle(msg: dict, log: Ledger):
         return _result(mid, {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "ledger", "version": "0.1.0"},
+            "serverInfo": {"name": "ledger", "version": __version__},
         })
     if method == "tools/list":
         return _result(mid, {"tools": TOOLS})

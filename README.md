@@ -1,5 +1,7 @@
 # arcaeon-ledger
 
+<!-- mcp-name: io.arcaeon/ledger -->
+
 **Observability tools show you what your agent did. `arcaeon-ledger` lets you _prove_ it.**
 
 Every record is hash-chained to the one before it. Edit a row, delete one, or
