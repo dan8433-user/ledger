@@ -74,7 +74,7 @@ try:                      # Windows byte-range locks
 except ImportError:       # pragma: no cover - platform dependent
     _msvcrt = None
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 __all__ = ["Ledger", "VerifyResult", "verify_file", "chain_at", "authority", "Head",
            "bind_artefact", "verify_artefact", "digest_bytes", "digest_json",
            "WitnessStore", "publish_head", "verify_against_witness", "WitnessVerdict"]
@@ -115,7 +115,10 @@ def _chain(prev: str, obj: dict) -> str:
     """chain = sha256(prev_chain + canonical-json-of-row-without-chain)."""
     body = json.dumps({k: v for k, v in obj.items() if k != "chain"},
                       ensure_ascii=False, sort_keys=True)
-    return hashlib.sha256((prev + body).encode("utf-8")).hexdigest()[:_CHAIN_LEN]
+    # str(prev) is a no-op on every honest path (prev is always a hex string
+    # produced here or 'genesis'); it is a defense-in-depth floor so no route to
+    # a non-string prev can ever crash the hash with `int + str` (0.5.5).
+    return hashlib.sha256((str(prev) + body).encode("utf-8")).hexdigest()[:_CHAIN_LEN]
 
 
 _APPEND_LOCK_TIMEOUT = 15.0   # seconds to wait for a contended append lock
@@ -475,6 +478,25 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
                 res.first_break = res.first_break or f"line {i}: unchained (prechain) row rejected in strict mode"
             else:
                 res.prechain += 1
+            continue
+        if not isinstance(claimed, str):
+            # A chain link is a hex string. A present-but-NON-STRING chain
+            # (int/float/bool/list/dict — all legal JSON, so all arrive from the
+            # wire or a corrupt file) is malformed: never a valid link, always a
+            # break. It must be reported as one, not crash the verifier. Left
+            # unguarded it flowed into `prev = claimed` below, and the NEXT row's
+            # `_chain(prev, obj)` does `prev + body` on a non-str prev and raised
+            # TypeError — turning verify() into an exception instead of a verdict,
+            # the same crash class the bare-scalar guard above closes. Continue
+            # from a safe, deterministic string so later rows are still checked
+            # and one poisoned link does not cascade (a following honest row was
+            # chained from the real hex head, so it still fails against "" — no
+            # false green). Found by property-fuzzing, 0.5.5.
+            res.ok = False
+            res.breaks += 1
+            res.first_break = res.first_break or f"line {i}: non-string chain value"
+            prev = ""
+            res.chained += 1
             continue
         want = _chain(prev, obj)
         if claimed != want:
