@@ -198,5 +198,72 @@ def test_chain_comparison_is_full_width():
         assert r.first_break == "line 2: chain mismatch"
 
 
+# --------------------------------------------------------------------------
+# 0.5.4 — concurrent append must not fork the chain or lose rows (M3)
+# --------------------------------------------------------------------------
+
+def _conc_worker(args):
+    path, tag, n = args
+    led = Ledger(path)
+    for i in range(n):
+        led.append({"tool": tag, "i": i})
+    return n
+
+
+def test_concurrent_appends_do_not_fork_or_lose_rows():
+    """Two processes each appending 20 rows onto a 1-row seed must yield a
+    single continuous 41-row chain — no forks, no lost rows.
+
+    Before 0.5.4 the read-tail + write was unlocked: both writers read the same
+    previous chain and forked it, and interleaved "ab" writes dropped rows. The
+    scrutiny measured 41 -> rows=38, breaks=17. The cross-process append lock
+    serializes the critical section.
+    """
+    import multiprocessing as mp
+    with tempfile.TemporaryDirectory() as d:
+        path = str(Path(d) / "conc.jsonl")
+        Ledger(path).append({"tool": "seed", "i": 0})
+        with mp.Pool(2) as pool:
+            pool.map(_conc_worker, [(path, "A", 20), (path, "B", 20)])
+        r = verify_file(path)
+        assert r.ok, f"concurrent appends forked the chain: {r}"
+        assert r.rows == 41, f"expected 41 rows, got {r.rows}"
+        assert r.breaks == 0, f"expected 0 breaks, got {r.breaks}"
+
+
+# --------------------------------------------------------------------------
+# 0.5.4 — strict verify surfaces a fabricated-legacy-prepend (M2)
+# --------------------------------------------------------------------------
+
+def test_strict_mode_rejects_prepended_fabricated_legacy_row():
+    """A fabricated unchained row prepended before a genuine chain verifies
+    GREEN by default (tolerated as pre-chain legacy) but must be a break under
+    strict=True. The default path stays green and exposes prechain=1."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "log.jsonl"
+        led = Ledger(p)
+        led.append({"tool": "real", "amount": 1})
+        led.append({"tool": "real", "amount": 2})
+        lines = p.read_text(encoding="utf-8").splitlines()
+        fake = json.dumps({"tool": "INJECTED_fake_history", "amount": 9999})
+        p.write_text(fake + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
+
+        default = verify_file(p)
+        assert default.ok and default.prechain == 1, default
+
+        strict = verify_file(p, strict=True)
+        assert not strict.ok, "strict mode passed a prepended fabricated legacy row"
+        assert strict.prechain == 1
+        assert strict.breaks == 1
+        assert "prechain" in strict.first_break
+
+        # A clean chain-from-genesis log stays green in strict mode.
+        assert verify_file(p.with_name("absent.jsonl"), strict=True).rows == 0
+        p2 = Path(d) / "clean.jsonl"
+        c = Ledger(p2)
+        c.append({"n": 1}); c.append({"n": 2})
+        assert verify_file(p2, strict=True).ok
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

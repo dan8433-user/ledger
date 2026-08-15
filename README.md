@@ -89,12 +89,12 @@ appearing *after* the chain begins is itself flagged. On a mismatch, verify
 keeps going from the claimed value so it counts later damage honestly instead of
 cascading one break into noise.
 
-## What it proves — and the three things it doesn't
+## What it proves — and the four things it doesn't
 
 Being precise here is the product, not a disclaimer. A hash chain proves the
 recorded bytes were not altered *in place* after writing: mid-file edit, delete,
 and reorder all break it and `verify` names the row. It does **not** by itself
-prove three other things:
+prove four other things:
 
 **1. Truncation.** Lop off the most recent rows and what remains verifies clean —
 no append-only chain catches this alone. Close it by publishing the head somewhere
@@ -117,6 +117,17 @@ and store that digest in the row, so a third party can re-get it and compare.
 **3. Authorship.** `authority()` (above) records who-claimed-what, but it is data
 in the row, not a signature — a rewriter who re-mints from genesis re-mints it too.
 External head-anchoring (#1) is the thing a re-minter cannot advance.
+
+**4. Fabricated-legacy-prepend.** Rows with no `chain` field are tolerated *before*
+the first chained row — that is deliberate, so you can adopt the chain on top of an
+existing log without rewriting its history. The same toleration is a hole: prepend
+fabricated unchained "legacy" rows in front of a genuine chain and the file still
+verifies green, because those rows are counted as `prechain` and skipped. `verify`
+exposes the count in `prechain`, but the headline `ok` ignores it. If your log is
+chained from genesis and must have no legitimate legacy rows, pass
+`verify(strict=True)` — it treats any unchained row as a break, so a prepended fake
+cannot ride in green. (An unchained row inserted *after* the chain begins is already
+flagged in every mode.)
 
 Scoped honestly, the primitive is *"this file was not rewritten in place"* — small,
 true, and testable. The layers above (external anchoring via `head()`, artefact

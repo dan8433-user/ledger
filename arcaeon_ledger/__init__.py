@@ -27,6 +27,15 @@ about the boundary is the point:
   - Authorship: `authority()` records who-claimed-what, but it is data in the
     row, not a signature. A rewriter who re-mints from genesis can re-mint it
     too. External head-anchoring is what a re-minter cannot advance.
+  - Fabricated-legacy-prepend: rows with no `chain` field are tolerated BEFORE
+    the first chained row (adoption-on-existing-log — real pre-chain history).
+    That toleration is also a hole: PREPEND fabricated unchained "legacy" rows
+    in front of a genuine chain and the file still verifies GREEN, because those
+    rows are counted as `prechain` and skipped, not verified. `verify()` exposes
+    the count via `prechain`, but the headline `ok`/`__bool__` ignore it. If your
+    log has been chained from genesis and must have NO legacy rows, pass
+    `verify(strict=True)`: it treats any unchained row as a break. (Inserting an
+    unchained row AFTER the chain begins is already flagged in every mode.)
 
 TWO WRITE-SIDE BOUNDARIES, named because a cross-language verifier will meet them
 (audited 2026-08-14; both are on the writer, neither weakens `verify()` here):
@@ -49,12 +58,23 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-__version__ = "0.5.3"
+try:                      # POSIX advisory locks
+    import fcntl as _fcntl
+except ImportError:       # pragma: no cover - platform dependent
+    _fcntl = None
+try:                      # Windows byte-range locks
+    import msvcrt as _msvcrt
+except ImportError:       # pragma: no cover - platform dependent
+    _msvcrt = None
+
+__version__ = "0.5.4"
 __all__ = ["Ledger", "VerifyResult", "verify_file", "chain_at", "authority", "Head",
            "bind_artefact", "verify_artefact", "digest_bytes", "digest_json",
            "WitnessStore", "publish_head", "verify_against_witness", "WitnessVerdict"]
@@ -96,6 +116,72 @@ def _chain(prev: str, obj: dict) -> str:
     body = json.dumps({k: v for k, v in obj.items() if k != "chain"},
                       ensure_ascii=False, sort_keys=True)
     return hashlib.sha256((prev + body).encode("utf-8")).hexdigest()[:_CHAIN_LEN]
+
+
+_APPEND_LOCK_TIMEOUT = 15.0   # seconds to wait for a contended append lock
+
+
+@contextmanager
+def _append_lock(path: Path):
+    """Cross-process exclusive lock around the read-tail + write of one append.
+
+    `append()` is a read-modify-write: it reads the previous chain (`_last_chain`)
+    then writes a row chaining from it. Without a lock, two concurrent writers
+    both read the same previous chain and both chain from it — the chain FORKS
+    (later `verify()` reports mismatches) and on Windows the interleaved `"ab"`
+    writes also drop rows outright. Serializing the whole read-then-write section
+    across processes makes concurrent `append()` safe: each writer sees the tail
+    the previous one actually committed.
+
+    Held on a sidecar `<path>.lock` file, never on the ledger itself, so the lock
+    never touches the emitted bytes. Acquisition is blocking-with-retry (a busy
+    loop against the non-blocking primitive, bounded by `_APPEND_LOCK_TIMEOUT`),
+    so contended writers wait and serialize rather than error. If the platform
+    offers no lock primitive at all, it degrades to no lock (best-effort,
+    single-writer assumption) rather than failing the append — correctness of a
+    lone writer is never reduced.
+    """
+    if _msvcrt is None and _fcntl is None:   # pragma: no cover - exotic platform
+        yield False
+        return
+    lock_path = Path(str(path) + ".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + _APPEND_LOCK_TIMEOUT
+        delay = 0.001
+        while True:
+            try:
+                if _msvcrt is not None:
+                    _msvcrt.locking(fd, _msvcrt.LK_NBLCK, 1)
+                else:
+                    _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    # Fall through unlocked rather than fail the append. A stuck
+                    # lock must not become a hard write outage; the single-writer
+                    # path is still correct, and a concurrent one degrades to the
+                    # pre-lock behaviour (RED-detectable), never to a lost verdict.
+                    yield False
+                    return
+                time.sleep(delay)
+                delay = min(delay * 2, 0.05)
+        try:
+            yield True
+        finally:
+            try:
+                if _msvcrt is not None:
+                    _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
+                else:
+                    _fcntl.flock(fd, _fcntl.LOCK_UN)
+            except OSError:              # pragma: no cover - best effort
+                pass
+    finally:
+        os.close(fd)
 
 
 def authority(principal: str, *, capability_version: str | None = None,
@@ -162,7 +248,9 @@ class Head:
 
 
 class Ledger:
-    """A hash-chained append-only JSONL log. One file, atomic appends."""
+    """A hash-chained append-only JSONL log. One file; each append is a single
+    atomic line write, and the read-tail + write is guarded by a cross-process
+    file lock so concurrent writers serialize instead of forking the chain."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -179,22 +267,50 @@ class Ledger:
         Atomic: append-binary + flush + fsync, so a crash mid-write never
         corrupts the file (a partial line fails to parse and is caught by
         verify, it never silently poisons the chain).
+
+        Concurrency-safe: the read-previous-chain + write is held under a
+        cross-process file lock (`<path>.lock`), so two processes appending at
+        once serialize rather than both chaining from the same tail and forking
+        the log. The lock never touches the emitted bytes.
         """
         obj = dict(record)
         if authority is not None:
             obj["authority"] = authority
         obj.setdefault("ts", _now_iso())
         obj.pop("chain", None)
-        obj["chain"] = _chain(self._last_chain(), obj)
-        line = json.dumps(obj, ensure_ascii=False) + "\n"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("ab") as fh:
-            fh.write(line.encode("utf-8"))
-            fh.flush()
+        # The chain read and the write are ONE critical section: the row must
+        # chain from the tail that is still the tail when it lands. Compute the
+        # chain, heal a missing newline, and write, all under the lock.
+        with _append_lock(self.path):
+            obj["chain"] = _chain(self._last_chain(), obj)
+            line = json.dumps(obj, ensure_ascii=False) + "\n"
+            # Heal a missing trailing newline before appending. A torn prior write
+            # (crash mid-append) or a file touched by external tooling can end
+            # WITHOUT a final "\n"; appending directly would glue this row onto that
+            # last line, producing one unparseable blob and destroying BOTH rows —
+            # silently, since append still returns a valid-looking chain hash. A
+            # normally-produced ledger always ends in "\n", so this branch never
+            # fires on the happy path and the emitted format is unchanged. The
+            # separator + row are written in a single call so the torn line becomes
+            # its own (flagged) line rather than swallowing the new row.
+            sep = b""
             try:
-                os.fsync(fh.fileno())
+                with self.path.open("rb") as rf:
+                    rf.seek(0, os.SEEK_END)
+                    if rf.tell() > 0:
+                        rf.seek(-1, os.SEEK_END)
+                        if rf.read(1) != b"\n":
+                            sep = b"\n"
             except OSError:
-                pass  # network mounts may not support fsync; flush is the floor
+                pass
+            with self.path.open("ab") as fh:
+                fh.write(sep + line.encode("utf-8"))
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass  # network mounts may not support fsync; flush is the floor
         return obj["chain"]
 
     def _last_chain(self) -> str:
@@ -249,8 +365,8 @@ class Ledger:
             return
 
     # -- verify -------------------------------------------------------------
-    def verify(self) -> VerifyResult:
-        return verify_file(self.path)
+    def verify(self, *, strict: bool = False) -> VerifyResult:
+        return verify_file(self.path, strict=strict)
 
     # -- external anchoring -------------------------------------------------
     def head(self) -> Head:
@@ -301,13 +417,19 @@ def chain_at(path: str | Path, n: int) -> str | None:
     return None
 
 
-def verify_file(path: str | Path) -> VerifyResult:
+def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
     """Recompute the chain over a file; report the first break by line number.
 
     Rows with no `chain` field are tolerated ONLY before the first chained row
     (legacy/pre-chain history) — an unchained row appearing after the chain has
     begun is itself a tamper signal. On a mismatch, verification continues from
     the CLAIMED value so later damage is counted honestly rather than cascading.
+
+    `strict=True` closes the fabricated-legacy-prepend hole: it treats ANY
+    unchained row as a break, so prepended fake "legacy" rows in front of a
+    genuine chain no longer verify green. Use it when the log is asserted to be
+    chained from genesis with no legitimate pre-chain history. The prechain
+    count is still reported either way; strict only decides whether it fails.
     """
     res = VerifyResult(ok=True)
     try:
@@ -342,6 +464,15 @@ def verify_file(path: str | Path) -> VerifyResult:
                 res.ok = False
                 res.breaks += 1
                 res.first_break = res.first_break or f"line {i}: unchained row after chain began"
+            elif strict:
+                # A prechain (unchained-before-chain) row. Tolerated by default as
+                # legacy history; in strict mode it is a break, so a fabricated
+                # "legacy" prepend cannot ride in green. Still counted as prechain
+                # so the surfaced count is identical between modes.
+                res.prechain += 1
+                res.ok = False
+                res.breaks += 1
+                res.first_break = res.first_break or f"line {i}: unchained (prechain) row rejected in strict mode"
             else:
                 res.prechain += 1
             continue
