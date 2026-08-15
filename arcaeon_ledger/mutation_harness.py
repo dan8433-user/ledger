@@ -221,9 +221,11 @@ def case_artefact_digest_mismatch() -> str:
     out = verify_artefact(art)
     _require(out["digest_ok"] is False,
              "verify_artefact stayed GREEN on a subject/digest disagreement — decoration")
+    _require(out["reason"] == "subject_digest_mismatch",
+             f"wrong typed reason: {out['reason']!r} (want 'subject_digest_mismatch')")
     _require(any("does not match" in n for n in out["notes"]),
              f"wrong failure note: {out['notes']!r}")
-    return "RED digest_ok=False ('subject.digest.sha256 does not match')"
+    return "RED digest_ok=False reason='subject_digest_mismatch'"
 
 
 def case_canonicalization_recipe_drift() -> str:
@@ -258,9 +260,60 @@ def case_canonicalization_recipe_drift() -> str:
     out = verify_artefact(art)
     _require(out["digest_ok"] is False,
              "verify_artefact stayed GREEN on an unknown recipe — decoration")
+    _require(out["reason"] == "unknown_recipe",
+             f"wrong typed reason: {out['reason']!r} (want 'unknown_recipe')")
     _require(any("unknown recipe" in n for n in out["notes"]),
              f"wrong failure note: {out['notes']!r}")
-    return "RED both arms (golden vector rejects drifted bytes; unknown recipe rejected)"
+    return "RED both arms (golden vector rejects drifted bytes; unknown recipe -> reason='unknown_recipe')"
+
+
+def case_unknown_recipe_version() -> str:
+    """Defect: a digest claiming json-c14n:v9 — a version of a KNOWN recipe that
+    this build has never shipped and cannot recompute.
+
+    This case exists because the harness carried it as a standing NOTE through
+    0.5.0/0.5.1: verify_artefact returned digest_ok=True with only a warning note,
+    on the reasoning that old rows keep old versions. But a FUTURE version cannot be
+    an old row, and the leniency was doing the one thing this library refuses —
+    reporting an unchecked digest as verified. 0.5.2 makes it a typed failure, and
+    the boundary that was named is now a case observed going red."""
+    art = bind_artefact({"k": 1})
+    _require(verify_artefact(art)["digest_ok"] is True,
+             "clean artefact must verify GREEN before mutation")
+    before = json.dumps(art, sort_keys=True).encode("utf-8")
+    art["digest"] = art["digest"].replace(":v1:", ":v9:")
+    art["recipe"] = art["recipe"].replace(":v1", ":v9")
+    _noop_guard("unknown-recipe-version", before,
+                json.dumps(art, sort_keys=True).encode("utf-8"))
+    out = verify_artefact(art)
+    _require(out["digest_ok"] is False,
+             "verify_artefact stayed GREEN on a version it cannot reproduce — "
+             "the 0.5.0 known-boundary NOTE, unclosed")
+    _require(out["reason"] == "unknown_recipe_version",
+             f"wrong typed reason: {out['reason']!r} (want 'unknown_recipe_version')")
+    return "RED digest_ok=False reason='unknown_recipe_version' (0.5.0 NOTE closed)"
+
+
+def case_unknown_algorithm() -> str:
+    """Defect: the algorithm field swapped to one this build does not compute
+    (sha256 -> md5) while the hex body is left alone.
+    Check that must catch it: the 'sha256:' prefix is a CLAIM about what was
+    computed, not decoration — an unsupported algo must be a typed failure, not a
+    pass on the strength of a recipe name that happens to still be registered."""
+    art = bind_artefact(b"the agent read this")
+    _require(verify_artefact(art)["digest_ok"] is True,
+             "clean artefact must verify GREEN before mutation")
+    before = json.dumps(art, sort_keys=True).encode("utf-8")
+    art["digest"] = art["digest"].replace("sha256:", "md5:", 1)
+    art["recipe"] = art["recipe"].replace("sha256:", "md5:", 1)
+    _noop_guard("unknown-algorithm", before,
+                json.dumps(art, sort_keys=True).encode("utf-8"))
+    out = verify_artefact(art)
+    _require(out["digest_ok"] is False,
+             "verify_artefact stayed GREEN on an algorithm it never ran — decoration")
+    _require(out["reason"] == "unknown_algorithm",
+             f"wrong typed reason: {out['reason']!r} (want 'unknown_algorithm')")
+    return "RED digest_ok=False reason='unknown_algorithm'"
 
 
 def case_nan_rejection() -> str:
@@ -308,26 +361,32 @@ CASES = [
     ("remint-vs-witness", case_remint_vs_witness),
     ("artefact-digest-mismatch", case_artefact_digest_mismatch),
     ("canonicalization-recipe-drift", case_canonicalization_recipe_drift),
+    ("unknown-recipe-version", case_unknown_recipe_version),
+    ("unknown-algorithm", case_unknown_algorithm),
     ("NaN-rejection", case_nan_rejection),
     ("no-op-guard-self-test", case_noop_guard_guards_itself),
 ]
 
 
-def _finding_version_ahead() -> str | None:
-    """Non-fatal probe, reported honestly: a digest claiming a FUTURE version
-    of a known recipe (json-c14n:v9) passes verify_artefact with digest_ok=True
-    plus a note. The leniency is deliberate for OLD rows keeping old versions,
-    but a version this build has never shipped cannot be an old row. The golden
-    vectors are the real drift guard; this names the boundary rather than
-    papering over it."""
+def _finding_subject_absent() -> str | None:
+    """Non-fatal probe, reported honestly — the leniency that REPLACED the
+    version-ahead one (that boundary is now case_unknown_recipe_version, red).
+
+    An artefact carrying a well-formed, supported-recipe digest string but NO
+    `subject` block passes with digest_ok=True: there is no second copy of the hex
+    to cross-check it against, so the check has nothing to disagree with. That is
+    honest — digest_ok means "this label is reproducible and the string is
+    self-consistent," and a lone string is trivially self-consistent — but a caller
+    treating digest_ok as "the artefact was checked against its source" is reading
+    more than it says. Only refetch=True on a URL does that."""
     art = bind_artefact({"k": 1})
-    art["digest"] = art["digest"].replace(":v1:", ":v9:")
-    art["recipe"] = art["recipe"].replace(":v1", ":v9")
+    art.pop("subject", None)
     out = verify_artefact(art)
     if out["digest_ok"]:
-        return ("verify_artefact returns digest_ok=True for a digest claiming "
-                "json-c14n:v9 (a version this build cannot reproduce) — note-only "
-                "leniency; the golden vectors, not this check, guard version drift")
+        return ("verify_artefact returns digest_ok=True for a digest string with no "
+                "subject block — nothing to cross-check the hex against. digest_ok "
+                "means 'reproducible label, self-consistent string', never 'the "
+                "bytes were re-checked'; refetch=True is the only check that does that")
     return None
 
 
@@ -345,7 +404,7 @@ def run() -> int:
             failures += 1
             print(f"  FAIL  {name}: harness error {type(e).__name__}: {e}")
 
-    finding = _finding_version_ahead()
+    finding = _finding_subject_absent()
     if finding:
         print(f"  NOTE  known-boundary: {finding}")
 

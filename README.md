@@ -153,10 +153,22 @@ Verify honestly:
 ```python
 from arcaeon_ledger import verify_artefact
 
-verify_artefact(art)                    # digest string well-formed + self-consistent
+verify_artefact(art)                    # recipe reproducible + string self-consistent
 verify_artefact(art, refetch=True)      # for a URL: re-fetch and compare
-# -> {"digest_ok": True, "refetch": "match" | "mismatch" | "unavailable", "notes": [...]}
+# -> {"digest_ok": True, "reason": None,
+#     "refetch": "match" | "mismatch" | "unavailable" | "skipped", "notes": [...]}
 ```
+
+**A label this build cannot reproduce is a typed failure, never a pass.** If the
+digest names an algorithm, recipe, or recipe *version* outside the supported
+registry, `verify_artefact` returns `digest_ok=False` with a machine-readable
+`reason` — one of `unknown_algorithm`, `unknown_recipe`, `unknown_recipe_version`,
+`malformed_digest`, `subject_digest_mismatch` — and never reaches the re-fetch
+stage, so an unverifiable recipe can't come back as `"match"`. A digest we cannot
+recompute is a digest we did not check, and "did not check" must not be reported as
+"verified." Old versions stay verifiable by staying listed in
+`SUPPORTED_RECIPE_VERSIONS` when a new one is minted, so the append-only recipe
+promise holds without the verifier waving through labels it has never shipped.
 
 **The honest boundary, stated loudly because it is the point:** a re-fetch
 `mismatch` means the content *changed or* was tampered — **indeterminate**. It is

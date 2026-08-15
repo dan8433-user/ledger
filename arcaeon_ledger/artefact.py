@@ -37,6 +37,15 @@ Two honest limits, stated up front because being precise about them IS the point
      rows keep `v1` forever, so a drifted canonicalizer never reads history as
      tampered.
 
+     The other half of a self-describing digest is that the verifier must REFUSE
+     labels it cannot reproduce. `verify_artefact` accepts a digest only when its
+     algorithm, recipe name, and recipe version are all in the supported registry
+     (`SUPPORTED_ALGOS`, `RECIPES`, `SUPPORTED_RECIPE_VERSIONS`); anything else is a
+     hard typed failure — `unknown_algorithm` / `unknown_recipe` /
+     `unknown_recipe_version` — never a pass with a warning attached. A digest we
+     cannot recompute is a digest we did not check, and "did not check" must not be
+     reported as "verified."
+
 The result of `bind_artefact` is a plain dict, shaped after the in-toto
 attestation `subject`, ready to drop into a ledger row (chain it like any field):
 
@@ -52,17 +61,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-__all__ = ["bind_artefact", "verify_artefact", "digest_bytes", "digest_json", "RECIPES"]
+__all__ = ["bind_artefact", "verify_artefact", "digest_bytes", "digest_json", "RECIPES",
+           "SUPPORTED_RECIPE_VERSIONS", "SUPPORTED_ALGOS", "FAILURE_REASONS"]
 
 # The frozen recipe registry. A recipe name maps to (version, description). Append
 # only: never repurpose or renumber an existing entry, or old digests stop
 # reproducing. New rule -> new name or bumped version, old rows keep their label.
+# This maps to the CURRENT version minted for each recipe — what `bind_artefact`
+# stamps today. It is NOT the set of versions verification accepts; that is
+# SUPPORTED_RECIPE_VERSIONS below, and the two are deliberately separate.
 RECIPES = {
     "raw-bytes": ("v1", "sha256 of the artefact's raw bytes, exactly as read"),
     "json-c14n": ("v1", "sha256 of json.dumps(value, sort_keys=True, "
@@ -70,7 +84,39 @@ RECIPES = {
                         "encoded UTF-8"),
 }
 
+# Every (recipe, version) pair THIS BUILD can actually reproduce. `verify_artefact`
+# accepts a digest only if its recipe AND version appear here — a label this build
+# cannot reproduce is a typed failure, never a note-only pass.
+#
+# This is also how the documented "old rows keep v1 forever" promise is kept: when
+# a future rule mints json-c14n v2, RECIPES flips to "v2" (new digests get the new
+# label) while this tuple becomes ("v1", "v2") — old v1 rows keep verifying,
+# because a version we still ship the code for is still reproducible. Append here;
+# only remove a version if the build genuinely loses the ability to compute it,
+# and say so in the changelog when you do.
+SUPPORTED_RECIPE_VERSIONS = {
+    "raw-bytes": ("v1",),
+    "json-c14n": ("v1",),
+}
+
+# Digest algorithms this build can reproduce, and the hex length each must present.
+# An algo outside this table is a typed failure: "sha256:" is not decoration, and a
+# digest string claiming md5/blake3/whatever is not something we verified.
+SUPPORTED_ALGOS = {"sha256": 64}
+
+# The typed failure vocabulary of `verify_artefact`. `reason` is exactly one of
+# these on failure, and None on success — so a caller can branch on the machine
+# value instead of substring-matching the human-readable notes.
+FAILURE_REASONS = (
+    "malformed_digest",       # not algo:recipe:ver:hex, or hex is not the algo's hex
+    "unknown_algorithm",      # algo not in SUPPORTED_ALGOS
+    "unknown_recipe",         # recipe name not in the registry
+    "unknown_recipe_version", # recipe known, version this build cannot reproduce
+    "subject_digest_mismatch",# embedded hex disagrees with subject.digest.sha256
+)
+
 _ALGO = "sha256"
+_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 _FETCH_CAP = 25 * 1024 * 1024  # 25 MB ceiling on a fetched artefact — refuse to hash more
 
 
@@ -206,8 +252,18 @@ def verify_artefact(artefact: dict, *, refetch: bool = False,
                     fetch_cap: int = _FETCH_CAP) -> dict:
     """Verify an artefact dict produced by `bind_artefact`.
 
-    Always: re-parses the self-describing digest and confirms the string is
-    well-formed and internally consistent (the embedded hex matches subject.digest).
+    Always: re-parses the self-describing digest, confirms this build can actually
+    REPRODUCE the recipe it names (algorithm + recipe + version all in the supported
+    registry), and confirms the string is internally consistent (the embedded hex
+    matches subject.digest).
+
+    An unsupported label is a HARD, TYPED failure — `digest_ok=False` plus a
+    machine-readable `reason` from `FAILURE_REASONS`. It is never a pass and never a
+    silent skip: a digest we cannot recompute is a digest we did not check, and
+    reporting an unchecked digest as verified is the exact overclaim this library
+    exists to refuse. (Before 0.5.2 an unknown VERSION of a known recipe passed with
+    only a note; the mutation harness carried that hole as a standing NOTE. It is
+    now a case, observed red.)
 
     If `refetch=True` and the artefact is a URL, also re-fetches and re-hashes,
     reporting the comparison HONESTLY:
@@ -215,37 +271,65 @@ def verify_artefact(artefact: dict, *, refetch: bool = False,
       - "mismatch"    — they do NOT. This means the content CHANGED or was tampered,
                         INDETERMINATE. It is NOT proof of tampering (the web mutates).
       - "unavailable" — the URL could not be fetched (404, network, cap exceeded).
+    A failed digest never reaches the re-fetch stage, so `refetch` can never report
+    "match" for an artefact whose recipe was not verified.
 
     Returns:
-        {"digest_ok": bool,               # digest string well-formed + self-consistent
+        {"digest_ok": bool,               # recipe reproducible + string self-consistent
+         "reason": None | <one of FAILURE_REASONS>,   # typed failure, None when ok
          "recipe": "<algo:recipe:ver>",
          "refetch": "match|mismatch|unavailable|skipped",
          "notes": [<str>, ...]}
     """
     notes: list[str] = []
-    out = {"digest_ok": False, "recipe": None, "refetch": "skipped", "notes": notes}
+    out = {"digest_ok": False, "reason": None, "recipe": None,
+           "refetch": "skipped", "notes": notes}
+
+    def fail(reason: str, note: str) -> dict:
+        out["reason"] = reason
+        notes.append(note)
+        return out
 
     try:
         ds = artefact["digest"]
         algo, recipe, ver, hexd = _parse_digest(ds)
     except (KeyError, ValueError) as e:
-        notes.append(f"unparseable artefact: {e}")
-        return out
+        return fail("malformed_digest", f"unparseable artefact: {e}")
 
     out["recipe"] = f"{algo}:{recipe}:{ver}"
 
-    if recipe not in RECIPES:
-        notes.append(f"unknown recipe {recipe!r} — cannot reproduce this digest")
-        return out
-    if RECIPES[recipe][0] != ver:
-        notes.append(f"recipe {recipe} is at {RECIPES[recipe][0]}, digest claims {ver} "
-                     f"(old rows keep their version; this is not itself tampering)")
+    # 1. algorithm — "sha256:" is a claim about what was computed, not decoration.
+    if algo not in SUPPORTED_ALGOS:
+        return fail("unknown_algorithm",
+                    f"unknown digest algorithm {algo!r} — this build reproduces only "
+                    f"{sorted(SUPPORTED_ALGOS)}; cannot verify this digest")
 
-    # internal consistency: embedded hex must equal subject.digest.sha256
+    # 2. recipe name — an unregistered canonicalization rule is unreproducible.
+    if recipe not in RECIPES:
+        return fail("unknown_recipe",
+                    f"unknown recipe {recipe!r} — cannot reproduce this digest")
+
+    # 3. recipe VERSION — a version this build never shipped cannot be an old row.
+    #    Old versions stay verifiable by remaining listed in
+    #    SUPPORTED_RECIPE_VERSIONS; anything else we simply cannot recompute.
+    supported = SUPPORTED_RECIPE_VERSIONS.get(recipe, ())
+    if ver not in supported:
+        return fail("unknown_recipe_version",
+                    f"recipe {recipe} version {ver} is not reproducible by this build "
+                    f"(it reproduces {list(supported)}) — cannot verify this digest")
+
+    # 4. hex shape — the right length of hex for the named algorithm, or the string
+    #    is not a digest at all and nothing below it means anything.
+    want_len = SUPPORTED_ALGOS[algo]
+    if len(hexd) != want_len or not _HEX_RE.match(hexd):
+        return fail("malformed_digest",
+                    f"digest hex is not {want_len} hex characters for {algo}")
+
+    # 5. internal consistency: embedded hex must equal subject.digest.sha256
     subj_hex = (((artefact.get("subject") or {}).get("digest") or {}).get("sha256"))
     if subj_hex is not None and subj_hex != hexd:
-        notes.append("subject.digest.sha256 does not match the digest string's hex")
-        return out
+        return fail("subject_digest_mismatch",
+                    "subject.digest.sha256 does not match the digest string's hex")
 
     out["digest_ok"] = True
 

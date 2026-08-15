@@ -69,8 +69,47 @@ def test_unknown_recipe_fails_honestly():
     art["digest"] = art["digest"].replace("raw-bytes", "made-up-recipe")
     res = verify_artefact(art)
     assert not res["digest_ok"]
+    assert res["reason"] == "unknown_recipe", res
     assert any("unknown recipe" in n for n in res["notes"]), res
-    print("PASS unknown recipe fails with an honest note, not a silent pass")
+    print("PASS unknown recipe fails with a typed reason, not a silent pass")
+
+
+def test_unsupported_labels_are_typed_failures():
+    """0.5.2: anything this build cannot REPRODUCE is a hard typed failure. A
+    digest we can't recompute is a digest we didn't check."""
+    good = bind_artefact({"claim": "price is $49"})
+    assert verify_artefact(good)["digest_ok"] and verify_artefact(good)["reason"] is None
+
+    def planted(**swap):
+        a = json.loads(json.dumps(good))
+        a["digest"] = a["digest"].replace(swap["old"], swap["new"], 1)
+        a["recipe"] = a["recipe"].replace(swap["old"], swap["new"], 1)
+        return a
+
+    cases = [
+        (planted(old="json-c14n", new="json-c14n-drift"), "unknown_recipe"),
+        (planted(old=":v1", new=":v9"), "unknown_recipe_version"),
+        (planted(old="sha256", new="md5"), "unknown_algorithm"),
+        ({**json.loads(json.dumps(good)), "digest": good["digest"][:-20]},
+         "malformed_digest"),
+    ]
+    for art, want in cases:
+        res = verify_artefact(art)
+        assert res["digest_ok"] is False, (want, res)
+        assert res["reason"] == want, (want, res)
+    # and a failed digest never reaches refetch — no false 'match' on an
+    # unverifiable recipe
+    assert verify_artefact(cases[1][0], refetch=True)["refetch"] == "skipped"
+    print("PASS unsupported algo/recipe/version/hex -> typed failure, never a pass")
+
+
+def test_supported_recipes_still_verify():
+    """Backward compat: the two shipped recipes verify exactly as before."""
+    for art in (bind_artefact(b"raw bytes here"), bind_artefact({"a": 1, "b": [2, 3]})):
+        res = verify_artefact(art)
+        assert res["digest_ok"] is True and res["reason"] is None, res
+        assert res["recipe"] in ("sha256:raw-bytes:v1", "sha256:json-c14n:v1"), res
+    print("PASS sha256:raw-bytes:v1 and sha256:json-c14n:v1 unchanged (compat)")
 
 
 def test_refetch_on_non_url_is_skipped_not_matched():
@@ -105,6 +144,8 @@ if __name__ == "__main__":
     test_bind_file()
     test_tampered_digest_is_caught()
     test_unknown_recipe_fails_honestly()
+    test_unsupported_labels_are_typed_failures()
+    test_supported_recipes_still_verify()
     test_refetch_on_non_url_is_skipped_not_matched()
     test_artefact_chains_inside_a_ledger_row()
     print("\nALL PASS — artefact-binding: self-describing reproducible digests, "
