@@ -26,8 +26,8 @@ log.verify()          # VerifyResult(ok=True, rows=2, chained=2, ...)
 Tampering is caught, not hoped against:
 
 ```python
-# someone edits row 1's amount in the file by hand...
-log.verify()          # VerifyResult(ok=False, first_break="line 1: chain mismatch")
+# someone edits row 2's amount in the file by hand...
+log.verify()          # VerifyResult(ok=False, first_break="line 2: chain mismatch")
 ```
 
 CLI (wire it into CI or a pre-ship gate — a tampered log exits nonzero):

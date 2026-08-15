@@ -2,6 +2,7 @@
 
     python -m arcaeon_ledger.cli verify agent.log.jsonl
     python -m arcaeon_ledger.cli append agent.log.jsonl '{"tool":"search","ok":true}'
+    python -m arcaeon_ledger.cli --help | --version
 
 Exit code 0 = chain intact, 1 = broken (or bad usage). The nonzero exit is the
 point: wire `verify` into CI or a pre-ship gate and a tampered log fails loud.
@@ -11,13 +12,21 @@ from __future__ import annotations
 import json
 import sys
 
-from arcaeon_ledger import Ledger, verify_file
+from arcaeon_ledger import Ledger, __version__, verify_file
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    usage = (__doc__ or "usage: ledger verify|append <path> [record]").strip()
+    # asking for help is not a usage error: it prints usage and exits 0.
+    if argv and argv[0] in ("-h", "--help"):
+        print(usage)
+        return 0
+    if argv and argv[0] == "--version":
+        print(f"arcaeon-ledger {__version__}")
+        return 0
     if len(argv) < 2 or argv[0] not in ("verify", "append"):
-        print((__doc__ or "usage: ledger verify|append <path> [record]").strip())
+        print(usage)
         return 1
     cmd, path = argv[0], argv[1]
     if cmd == "verify":
