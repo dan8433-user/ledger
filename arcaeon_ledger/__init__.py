@@ -28,6 +28,20 @@ about the boundary is the point:
     row, not a signature. A rewriter who re-mints from genesis can re-mint it
     too. External head-anchoring is what a re-minter cannot advance.
 
+TWO WRITE-SIDE BOUNDARIES, named because a cross-language verifier will meet them
+(audited 2026-08-14; both are on the writer, neither weakens `verify()` here):
+  - Rows are serialized with Python's json.dumps. If you put float('nan') or
+    float('inf') in a record it is written as the bare tokens NaN / Infinity,
+    which round-trip in Python but are NOT valid JSON — a strict RFC 8259 parser
+    in another language rejects the line and reads your honest log as damaged.
+    Keep finite numbers in rows, or stringify them yourself. (`digest_json` DOES
+    refuse NaN; the chain path deliberately still accepts what you hand it rather
+    than raising inside an append that has already been decided on.)
+  - JSON permits duplicate keys and parsers disagree on which wins (Python keeps
+    the last). A row containing the same key twice can therefore read differently
+    to different verifiers while the chain stays green over the last-wins parse.
+    Don't hand-write rows; `append()` never produces one.
+
 Extracted from a hash-chained action ledger running in production. MIT.
 """
 from __future__ import annotations
@@ -40,7 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
 __all__ = ["Ledger", "VerifyResult", "verify_file", "chain_at", "authority", "Head",
            "bind_artefact", "verify_artefact", "digest_bytes", "digest_json",
            "WitnessStore", "publish_head", "verify_against_witness", "WitnessVerdict"]
@@ -51,6 +65,30 @@ _CHAIN_LEN = 32  # first N hex chars of the sha256 — plenty for tamper-evidenc
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_SCAN_CHUNK = 8192      # initial backward-scan block
+_SCAN_CHUNK_MAX = 1 << 20
+
+
+def _line_start_before(fh, end: int) -> int:
+    """Byte offset just after the last newline strictly before `end` (else 0).
+
+    Walks backwards in doubling blocks, so finding the start of a line costs one
+    pass over that line however long it is — a 40 MB row is found in 40 MB of
+    reads, not in a fixed window that silently misses it.
+    """
+    pos = end
+    chunk = _SCAN_CHUNK
+    while pos > 0:
+        start = max(0, pos - chunk)
+        fh.seek(start)
+        idx = fh.read(pos - start).rfind(b"\n")
+        if idx != -1:
+            return start + idx + 1
+        pos = start
+        chunk = min(chunk * 2, _SCAN_CHUNK_MAX)
+    return 0
 
 
 def _chain(prev: str, obj: dict) -> str:
@@ -93,6 +131,12 @@ class VerifyResult:
     chained: int = 0
     prechain: int = 0
     first_break: str | None = None
+    # Total breaks found, not just the first. Added 0.5.3 so the documented
+    # "verification continues from the CLAIMED value, so later damage is counted
+    # honestly rather than cascading" is OBSERVABLE: a single mid-file edit must
+    # produce breaks == 1. A verifier that cascaded reported the same first_break
+    # and was indistinguishable until this field existed.
+    breaks: int = 0
 
     def __bool__(self) -> bool:  # `if log.verify(): ...`
         return self.ok
@@ -154,23 +198,40 @@ class Ledger:
         return obj["chain"]
 
     def _last_chain(self) -> str:
-        """Chain of the last row ('genesis' if empty/missing). Tail-read only."""
+        """Chain of the last row ('genesis' if empty/missing).
+
+        Reads BACKWARDS a line at a time until a complete, parseable object row
+        is in hand — never a fixed-size tail window.
+
+        This is load-bearing, not a tidy-up (fixed 0.5.3). Through 0.5.2 this read
+        a fixed 8 KB tail: a final row LONGER than that window left no parseable
+        line inside it, so this returned 'genesis' and the next append started a
+        FRESH CHAIN mid-file. Nothing warned; verify() then reported a mismatch on
+        an honest log, and — far worse — every row before the reset point became
+        detachable: delete them all and the remainder verified GREEN. Rows over
+        8 KB are ordinary (a fetched page, tool stdout), so this was reachable
+        without an attacker doing anything but waiting.
+        """
         try:
             with self.path.open("rb") as fh:
                 fh.seek(0, os.SEEK_END)
-                size = fh.tell()
-                fh.seek(max(0, size - 8192))
-                tail = fh.read().decode("utf-8", errors="replace")
+                end = fh.tell()
+                while end > 0:
+                    start = _line_start_before(fh, end)
+                    fh.seek(start)
+                    raw = fh.read(end - start).strip()
+                    if raw:
+                        try:
+                            obj = json.loads(raw.decode("utf-8", errors="replace"))
+                        except ValueError:
+                            obj = None  # partial/corrupt line: keep walking back
+                        if isinstance(obj, dict):
+                            return obj.get("chain") or _GENESIS
+                    if start == 0:
+                        break
+                    end = start - 1  # step over the delimiting newline
         except OSError:
             return _GENESIS
-        for raw in reversed(tail.splitlines()):
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                return json.loads(raw).get("chain") or _GENESIS
-            except ValueError:
-                continue
         return _GENESIS
 
     # -- read ---------------------------------------------------------------
@@ -232,6 +293,8 @@ def chain_at(path: str | Path, n: int) -> str | None:
             obj = json.loads(raw)
         except ValueError:
             continue
+        if not isinstance(obj, dict):
+            continue  # not a row; must be counted exactly as verify_file counts
         count += 1
         if count == n:
             return obj.get("chain")
@@ -250,7 +313,7 @@ def verify_file(path: str | Path) -> VerifyResult:
     try:
         lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as e:
-        return VerifyResult(ok=False, first_break=f"unreadable: {e}")
+        return VerifyResult(ok=False, first_break=f"unreadable: {e}", breaks=1)
     prev = _GENESIS
     for i, raw in enumerate(lines, 1):
         raw = raw.strip()
@@ -260,13 +323,24 @@ def verify_file(path: str | Path) -> VerifyResult:
             obj = json.loads(raw)
         except ValueError:
             res.ok = False
+            res.breaks += 1
             res.first_break = res.first_break or f"line {i}: unparseable"
+            continue
+        if not isinstance(obj, dict):
+            # A bare scalar/array line is not a row. Before 0.5.3 this reached
+            # obj.pop("chain") and raised AttributeError/TypeError out of
+            # verify() — one smuggled line turned the verifier into a crash
+            # instead of a verdict. It is a break, named like every other break.
+            res.ok = False
+            res.breaks += 1
+            res.first_break = res.first_break or f"line {i}: not a JSON object"
             continue
         res.rows += 1
         claimed = obj.pop("chain", None)
         if claimed is None:
             if res.chained:
                 res.ok = False
+                res.breaks += 1
                 res.first_break = res.first_break or f"line {i}: unchained row after chain began"
             else:
                 res.prechain += 1
@@ -274,6 +348,7 @@ def verify_file(path: str | Path) -> VerifyResult:
         want = _chain(prev, obj)
         if claimed != want:
             res.ok = False
+            res.breaks += 1
             res.first_break = res.first_break or f"line {i}: chain mismatch"
         prev = claimed
         res.chained += 1

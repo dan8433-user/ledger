@@ -242,6 +242,8 @@ def bind_artefact(source: Any, *, canon: str = "auto",
 
 def _parse_digest(s: str) -> tuple[str, str, str, str]:
     """Split a self-describing digest 'algo:recipe:ver:hex' into its parts."""
+    if not isinstance(s, str):
+        raise ValueError(f"digest must be a string, got {type(s).__name__}")
     parts = s.split(":")
     if len(parts) != 4:
         raise ValueError(f"malformed digest string: {s!r}")
@@ -290,10 +292,17 @@ def verify_artefact(artefact: dict, *, refetch: bool = False,
         notes.append(note)
         return out
 
+    # Type confusion is a MALFORMED artefact, not an exception. Through 0.5.2 a
+    # non-str digest (or a non-dict artefact) escaped as AttributeError/TypeError
+    # from a function whose entire contract is "typed failure, never a crash",
+    # so a caller branching on `reason` got an exception instead. (0.5.3)
+    if not isinstance(artefact, dict):
+        return fail("malformed_digest",
+                    f"artefact must be an object, got {type(artefact).__name__}")
     try:
         ds = artefact["digest"]
         algo, recipe, ver, hexd = _parse_digest(ds)
-    except (KeyError, ValueError) as e:
+    except (KeyError, ValueError, TypeError) as e:
         return fail("malformed_digest", f"unparseable artefact: {e}")
 
     out["recipe"] = f"{algo}:{recipe}:{ver}"
@@ -325,9 +334,19 @@ def verify_artefact(artefact: dict, *, refetch: bool = False,
         return fail("malformed_digest",
                     f"digest hex is not {want_len} hex characters for {algo}")
 
-    # 5. internal consistency: embedded hex must equal subject.digest.sha256
-    subj_hex = (((artefact.get("subject") or {}).get("digest") or {}).get("sha256"))
-    if subj_hex is not None and subj_hex != hexd:
+    # 5. internal consistency: embedded hex must equal subject.digest.sha256.
+    #    Compared case-insensitively — hex is case-insensitive by definition, and
+    #    an up-cased copy of the SAME digest is not a disagreement (0.5.3).
+    subj = artefact.get("subject")
+    if subj is not None and not isinstance(subj, dict):
+        return fail("malformed_digest", "subject is present but is not an object")
+    subj_digest = (subj or {}).get("digest")
+    if subj_digest is not None and not isinstance(subj_digest, dict):
+        return fail("malformed_digest", "subject.digest is present but is not an object")
+    subj_hex = (subj_digest or {}).get("sha256")
+    if subj_hex is not None and not isinstance(subj_hex, str):
+        return fail("malformed_digest", "subject.digest.sha256 is not a string")
+    if subj_hex is not None and subj_hex.casefold() != hexd.casefold():
         return fail("subject_digest_mismatch",
                     "subject.digest.sha256 does not match the digest string's hex")
 
@@ -336,7 +355,9 @@ def verify_artefact(artefact: dict, *, refetch: bool = False,
     if not refetch:
         return out
 
-    name = ((artefact.get("subject") or {}).get("name")) or ""
+    name = (subj or {}).get("name")
+    if not isinstance(name, str):
+        name = ""
     if not _looks_like_url(name):
         notes.append("refetch requested but artefact is not a URL; nothing to re-fetch")
         out["refetch"] = "skipped"
@@ -360,7 +381,7 @@ def verify_artefact(artefact: dict, *, refetch: bool = False,
         notes.append(f"could not re-fetch ({e}); mismatch NOT implied")
         return out
 
-    if now_hex == hexd:
+    if now_hex.casefold() == hexd.casefold():
         out["refetch"] = "match"
     else:
         out["refetch"] = "mismatch"

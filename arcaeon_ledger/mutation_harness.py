@@ -33,7 +33,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import Ledger, digest_json, bind_artefact, verify_artefact
+from . import Ledger, digest_json, bind_artefact, verify_artefact, verify_file
 from .witness import WitnessStore, publish_head, verify_against_witness
 
 # Frozen json-c14n:v1 vector (same freeze as selftest.py, 0.3.0, 2026-08-13).
@@ -146,6 +146,134 @@ def case_unchained_row_after_chain_start() -> str:
         _require(r.first_break == "line 7: unchained row after chain began",
                  f"wrong first_break: {r.first_break!r}")
         return "RED first_break='line 7: unchained row after chain began'"
+
+
+def case_chain_comparison_is_full_width() -> str:
+    """Defect: a forged chain differing from the true one ONLY in its last hex
+    character. Check that must catch it: the chain comparison is over the whole
+    128-bit value, not a prefix of it.
+
+    Added 0.5.3 after a hostile audit planted `claimed[:8] != want[:8]` in
+    verify_file — a one-character 'optimization' that drops the chain to 32 bits
+    (birthday-forgeable in ~2**16 work) — and the ENTIRE harness stayed green.
+    Every other case mutates content, which changes the whole hash, so none of
+    them could tell a full-width comparison from a truncated one. A check nobody
+    can observe failing is decoration; this is that check."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "log.jsonl"
+        # Exactly 2 rows and the LAST one is forged: with a truncated comparison
+        # there is no later row left to break, so the whole log passes GREEN and
+        # the defect is unmistakable rather than showing up as a shifted line.
+        led = _mint(p, n=2)
+        _require(led.verify().ok, "clean fixture must verify GREEN before mutation")
+        before = p.read_bytes()
+        lines = before.decode("utf-8").splitlines()
+        obj = json.loads(lines[1])
+        true_chain = obj["chain"]
+        obj["chain"] = true_chain[:-1] + ("0" if true_chain[-1] != "0" else "1")
+        lines[1] = json.dumps(obj, ensure_ascii=False)
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _noop_guard("chain-comparison-full-width", before, p.read_bytes())
+        r = led.verify()
+        _require(not r.ok,
+                 "verify() accepted a chain differing only in its last character "
+                 "— the comparison is truncated, not full-width")
+        _require(r.first_break == "line 2: chain mismatch",
+                 f"wrong first_break: {r.first_break!r}")
+        return f"RED on a 1-character forgery ({true_chain} vs {obj['chain']})"
+
+
+def case_damage_is_counted_without_cascading() -> str:
+    """Defect: a verifier that, after a mismatch, keeps going from the value it
+    COMPUTED instead of the value the row CLAIMED — so one edit reports as
+    damage on every row after it.
+
+    The docstring promises the opposite ("verification continues from the
+    CLAIMED value so later damage is counted honestly rather than cascading"),
+    and until `VerifyResult.breaks` existed (0.5.3) that promise was invisible:
+    a cascading verifier produced the identical first_break and passed every
+    case in this harness. One edit must be one break."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "log.jsonl"
+        led = _mint(p, n=6)
+        clean = led.verify()
+        _require(clean.ok and clean.breaks == 0,
+                 f"clean fixture must be GREEN with 0 breaks, got {clean}")
+        before = p.read_bytes()
+        lines = before.decode("utf-8").splitlines()
+        obj = json.loads(lines[2])
+        obj["n"] = 999999
+        lines[2] = json.dumps(obj, ensure_ascii=False)
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _noop_guard("damage-counted-without-cascading", before, p.read_bytes())
+        r = led.verify()
+        _require(not r.ok, "verify() stayed GREEN on an in-place edit")
+        _require(r.first_break == "line 3: chain mismatch",
+                 f"wrong first_break: {r.first_break!r}")
+        _require(r.breaks == 1,
+                 f"ONE edited row reported {r.breaks} breaks — the verifier is "
+                 f"cascading from its own computed value instead of resuming "
+                 f"from the claimed one, which inflates every downstream row "
+                 f"into fake damage")
+        return "RED with breaks==1 (one edit, one break — no cascade)"
+
+
+def case_large_row_does_not_reset_the_chain() -> str:
+    """Defect (real, shipped through 0.5.2): a row longer than the tail window
+    made the NEXT append chain from 'genesis', silently resetting the chain
+    mid-file. Everything before the reset then became detachable — delete it all
+    and the remainder verified GREEN.
+
+    Check that must catch it: an honest two-append log with a large first row
+    verifies, AND deleting the rows before the large one is caught."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "log.jsonl"
+        led = Ledger(p)
+        led.append({"event": "payment", "amount": 10})
+        led.append({"event": "fraud_flag", "case": "the row someone wants gone"})
+        led.append({"event": "web.read", "body": "X" * 40000})  # > any tail window
+        led.append({"event": "payment", "amount": 30})
+        _require(led.verify().ok,
+                 "honest appends across a large row must verify GREEN — a row "
+                 "bigger than the tail read reset the chain to genesis")
+        before = p.read_bytes()
+        lines = before.decode("utf-8").splitlines()
+        chopped = Path(td) / "chopped.jsonl"
+        chopped.write_text("\n".join(lines[2:]) + "\n", encoding="utf-8")
+        _noop_guard("large-row-chain-reset", before, chopped.read_bytes())
+        r = verify_file(chopped)
+        _require(not r.ok,
+                 "deleting every row before the large row verified GREEN — the "
+                 "chain was reset there and the history detached")
+        _require(r.first_break == "line 1: chain mismatch",
+                 f"wrong first_break: {r.first_break!r}")
+        return "GREEN across a 40 KB row; RED on deleting the history before it"
+
+
+def case_non_object_row_is_typed_not_a_crash() -> str:
+    """Defect: a bare JSON scalar or array smuggled in as a line. Through 0.5.2
+    that reached obj.pop("chain") and raised AttributeError/TypeError straight
+    out of verify() — one line turned the verifier into a crash instead of a
+    verdict. Check that must catch it: a NAMED break, no exception."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "log.jsonl"
+        led = _mint(p, n=3)
+        _require(led.verify().ok, "clean fixture must verify GREEN before mutation")
+        before = p.read_bytes()
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write("123\n")
+        _noop_guard("non-object-row", before, p.read_bytes())
+        try:
+            r = led.verify()
+        except Exception as e:  # noqa: BLE001 - the defect IS the exception
+            raise MutationFailure(
+                f"verify() raised {type(e).__name__} on a non-object row instead "
+                f"of returning a typed break: {e}") from e
+        _require(not r.ok, "verify() stayed GREEN on a smuggled non-object row")
+        _require(r.first_break == "line 4: not a JSON object",
+                 f"wrong first_break: {r.first_break!r}")
+        _require(r.rows == 3, f"a non-row was counted as a row: rows={r.rows}")
+        return "RED first_break='line 4: not a JSON object' (no exception)"
 
 
 # --- witness verifier cases --------------------------------------------------
@@ -357,6 +485,10 @@ CASES = [
     ("row-reorder", case_row_reorder),
     ("mid-row-delete", case_mid_row_delete),
     ("unchained-row-after-chain-start", case_unchained_row_after_chain_start),
+    ("chain-comparison-full-width", case_chain_comparison_is_full_width),
+    ("damage-counted-without-cascading", case_damage_is_counted_without_cascading),
+    ("large-row-chain-reset", case_large_row_does_not_reset_the_chain),
+    ("non-object-row-typed", case_non_object_row_is_typed_not_a_crash),
     ("truncation-vs-witness", case_truncation_vs_witness),
     ("remint-vs-witness", case_remint_vs_witness),
     ("artefact-digest-mismatch", case_artefact_digest_mismatch),
