@@ -1,4 +1,4 @@
-"""ledger CLI — verify or append from the command line.
+"""ledger CLI - verify or append from the command line.
 
     python -m arcaeon_ledger.cli verify agent.log.jsonl
     python -m arcaeon_ledger.cli append agent.log.jsonl '{"tool":"search","ok":true}'
