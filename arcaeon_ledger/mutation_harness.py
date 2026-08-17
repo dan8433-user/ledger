@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Mutation harness: every claimed check, observed actually failing.
 
     python -m arcaeon_ledger.mutation_harness

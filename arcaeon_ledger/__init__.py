@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """arcaeon_ledger — a tamper-evident, append-only action log for AI agents.
 
 Observability tools show you what your agent did. `arcaeon_ledger` lets you
@@ -74,7 +75,7 @@ try:                      # Windows byte-range locks
 except ImportError:       # pragma: no cover - platform dependent
     _msvcrt = None
 
-__version__ = "0.5.5"
+__version__ = "0.5.6"
 __all__ = ["Ledger", "VerifyResult", "verify_file", "chain_at", "authority", "Head",
            "bind_artefact", "verify_artefact", "digest_bytes", "digest_json",
            "WitnessStore", "publish_head", "verify_against_witness", "WitnessVerdict"]
@@ -356,8 +357,18 @@ class Ledger:
     # -- read ---------------------------------------------------------------
     def __iter__(self) -> Iterator[dict]:
         try:
+            # split("\n"), NOT splitlines(). read_text() already normalizes
+            # \r\n / \r to \n (universal newlines), so "\n" is the only row
+            # delimiter this file's writer ever emits. splitlines() ALSO
+            # breaks on U+0085/U+2028/U+2029 (and a few C0 separators) —
+            # characters json.dumps(..., ensure_ascii=False) does NOT escape
+            # (they're outside the mandatory U+0000-U+001F escape range), so
+            # they round-trip raw into a row's content. A row containing one
+            # of them then gets sliced into fragments that fail to parse:
+            # sealed cleanly by append(), unreadable back — same bug class as
+            # the 2026-08-15 continuity splitlines find. (Fixed, unreleased.)
             for raw in self.path.read_text(encoding="utf-8",
-                                           errors="replace").splitlines():
+                                           errors="replace").split("\n"):
                 raw = raw.strip()
                 if raw:
                     try:
@@ -400,7 +411,11 @@ def chain_at(path: str | Path, n: int) -> str | None:
     if n <= 0:
         return _GENESIS
     try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        # split("\n"), not splitlines() -- see the note in Ledger.__iter__:
+        # splitlines() also breaks on U+0085/U+2028/U+2029, which the writer
+        # never uses as a delimiter but which unescaped row CONTENT can
+        # legitimately contain (ensure_ascii=False doesn't escape them).
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").split("\n")
     except OSError:
         return None
     count = 0
@@ -436,7 +451,18 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
     """
     res = VerifyResult(ok=True)
     try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        # split("\n"), not splitlines() -- the writer's only row delimiter is
+        # a literal LF (append() always writes json.dumps(...) + "\n"), and
+        # read_text()'s universal-newline handling already folds \r\n / \r to
+        # \n before this line runs. splitlines() additionally treats
+        # U+0085/U+2028/U+2029/\x0b/\x0c/\x1c-\x1e as row breaks even though
+        # they are ordinary, UNESCAPED row *content* under
+        # ensure_ascii=False (json.dumps only escapes U+0000-U+001F) — so an
+        # honest row containing one of them was sliced into unparseable
+        # fragments and reported as a break, even though nothing was
+        # tampered: sealed cleanly by append(), unverifiable on read. Same
+        # bug class as the 2026-08-15 continuity splitlines find. (Fixed, unreleased.)
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").split("\n")
     except OSError as e:
         return VerifyResult(ok=False, first_break=f"unreadable: {e}", breaks=1)
     prev = _GENESIS

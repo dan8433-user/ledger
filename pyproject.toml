@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arcaeon-ledger"
-version = "0.5.5"
+version = "0.5.6"
 description = "Tamper-evident, hash-chained action log for AI agents. Prove what your agent did."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -19,11 +19,18 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+dev = ["pytest", "hypothesis"]
+
 [project.scripts]
 arcaeon-ledger = "arcaeon_ledger.cli:main"
 
 [project.urls]
 Homepage = "https://arcaeon.io"
+Documentation = "https://arcaeon.io/ledger.md"
+Changelog = "https://github.com/dan8433-user/ledger/blob/main/CHANGELOG.md"
+Source = "https://github.com/dan8433-user/ledger"
+Issues = "https://github.com/dan8433-user/ledger/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["arcaeon_ledger"]

@@ -1,0 +1,112 @@
+name: test
+
+# REFERENCE COPY — this file lives in arcaeon-ledger as the canonical template for every
+# arcaeon-* PYTHON package repo (arcaeon-audit, arcaeon-baseline, arcaeon-compact,
+# arcaeon-continuity, arcaeon-dedup, arcaeon-distill, arcaeon-meter, arcaeon-once, and this
+# one — arcaeon-ledger). It is written so the SAME BYTES can be copied verbatim into every
+# repo's .github/workflows/test.yml with zero per-repo edits: every install/detect step is
+# self-discovering (reads pyproject.toml, scans for a selftest.py) rather than hardcoding a
+# package or repo name. See CI_SETUP_2026-08-16.md in velouria/projects/online_business/ for
+# the full rollout runbook, cost estimate, and design notes (this file is staged, not pushed
+# or enabled — copying it to the other 8 repos and enabling it is a separate authorized step).
+#
+# What it does, per push/PR: checkout -> setup-python (matrix: min + max supported version)
+# -> editable-install the repo's own package -> pip install pytest + hypothesis (unconditional,
+# since 2 of the 9 repos — arcaeon-dedup, arcaeon-meter — don't declare a [dev] extra) -> run
+# the repo's own test_*.py suite with pytest -> auto-detect and run the package's own
+# arcaeon_x/selftest.py if it ships one (5 of 9 repos do: baseline, compact, continuity,
+# distill, ledger; 4 don't: all, audit, dedup, meter — both cases are handled without editing
+# this file).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches requires-python = ">=3.9" declared across every arcaeon-* pyproject.toml.
+        # Two points (oldest + newest supported) catch syntax/stdlib drift at both ends
+        # without paying for a 4-5 point matrix on repos this small — see cost estimate in
+        # the runbook for why this is deliberately narrow.
+        python-version: ["3.9", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package (editable) + test deps
+        run: |
+          python -m pip install --upgrade pip
+          # Editable-install this repo's own package. Pulls its declared [project.dependencies]
+          # (e.g. arcaeon-audit needs arcaeon-ledger) from PyPI — the published versions, which
+          # is the same resolution a real `pip install arcaeon-x` would do. That means CI is
+          # testing against the LAST PUBLISHED version of sibling arcaeon-* packages, not
+          # whatever's sitting locally in a neighbor repo — a real gap, see runbook "known
+          # limitation: no cross-repo dependency pinning in CI" for the tradeoff and options.
+          pip install -e .
+          # Installed unconditionally rather than via `pip install -e .[dev]` because two repos
+          # in this line (arcaeon-dedup, arcaeon-meter) don't declare a [project.optional-
+          # dependencies] dev extra at all — that install would hard-fail on those two.
+          pip install pytest hypothesis
+
+      - name: Run test suite
+        run: |
+          set +e
+          pytest -q --tb=short
+          code=$?
+          set -e
+          if [ "$code" -eq 5 ]; then
+            # Exit 5 = "no tests collected". Real today only for arcaeon-all (a dependency-
+            # umbrella meta-package with no tests of its own, not yet pushed to GitHub) — treat
+            # as a pass rather than a red X so this template doesn't need an exception file.
+            echo "pytest collected zero tests — treating as pass (meta-package or empty suite)."
+            exit 0
+          fi
+          exit $code
+
+      - name: Run package selftest (if the package ships one)
+        run: |
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          import sys
+
+          root = pathlib.Path(".")
+          found = None
+          for child in sorted(root.iterdir()):
+              if not child.is_dir() or child.name.startswith((".", "_")):
+                  continue
+              if (child / "selftest.py").exists() and (child / "__init__.py").exists():
+                  found = child.name
+                  break
+
+          if found is None:
+              print("No <package>/selftest.py in this repo — skipping (not an error, 4 of 9 "
+                    "repos in this line don't ship one).")
+              raise SystemExit(0)
+
+          print(f"Running selftest: python -m {found}.selftest")
+          result = subprocess.run([sys.executable, "-m", f"{found}.selftest"])
+          raise SystemExit(result.returncode)
+          PY

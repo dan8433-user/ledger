@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """ledger MCP server — drop-in tamper-evident logging for any MCP agent.
 
 Zero dependencies: MCP is JSON-RPC 2.0 over stdio, so this speaks it directly

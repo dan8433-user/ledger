@@ -1,0 +1,58 @@
+name: test
+
+# REFERENCE COPY for the NODE repo (arcaeon-witness) only — staged here in arcaeon-ledger
+# alongside the Python reference (test.yml) per CI_SETUP_2026-08-16.md's single-staging-
+# location instruction. Rollout: copy this file's CONTENTS into
+# arcaeon-witness/.github/workflows/test.yml (the filename in the destination repo should be
+# test.yml, not test-witness-node.yml — this one is suffixed here only to avoid a name
+# collision with the Python reference sitting in the same staging folder).
+#
+# arcaeon-witness is the regression harness for the hosted witness's live payment/pin code:
+# 61 node:test cases across 8 test files, zero external dependencies by design (README
+# "Layout" note), Node's own built-in test runner (`node --test`), node >=20 required
+# (package.json "engines"). No package-lock.json exists and none is needed — there's nothing
+# to lock.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: node:test (node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json declares "engines": {"node": ">=20"}. Two points (the floor + current
+        # LTS) is enough coverage for a zero-dependency harness this size.
+        node-version: ["20", "22"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: |
+          # No package-lock.json (zero external deps by design) so there's nothing for
+          # `npm ci` to lock against. `npm install` is a no-op here beyond validating
+          # package.json parses; kept for the day a dependency is deliberately added.
+          npm install
+
+      - name: Run test suite (61 cases across 8 files)
+        run: npm test

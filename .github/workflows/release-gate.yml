@@ -1,0 +1,181 @@
+name: release-gate
+
+# DESIGN / CONCEPT — staged, NOT enabled. This is deliberately more sketch than the test.yml
+# / test-witness-node.yml references: it documents the intended shape of a tag-triggered
+# publish gate, but the twine/PyPI-publish step is commented out because it needs a decision
+# only Daniel can make (long-lived PYPI_API_TOKEN secret vs. PyPI Trusted Publishing/OIDC —
+# see CI_SETUP_2026-08-16.md "release-gate" section for the tradeoff). Do not enable this
+# workflow (rename off .yml, or leave un-pushed) until that decision is made and the honest
+# gaps below are resolved.
+#
+# HONEST GAP #1 — smoke_from_dist.py, as it exists today in velouria/scripts/, hardcodes
+# ARCAEON_ROOT = Path("C:/Users/USER") and expects to find dist/*.whl already built in every
+# sibling arcaeon-* repo checkout on the SAME machine. A standard GitHub-hosted runner
+# (ubuntu-latest, ephemeral, one repo checked out per job) cannot satisfy that as written.
+# This workflow sketches the "real CI" fix (multi-repo checkout into sibling dirs, see the
+# checkout matrix below) but that fix needs a small prerequisite code change — parameterize
+# ARCAEON_ROOT via an env var/--root flag instead of the hardcoded Windows path — which has
+# NOT been made yet. Until it is, the only way to run smoke_from_dist.py unmodified in CI is
+# a SELF-HOSTED runner on Daniel's own machine (see HONEST GAP #2).
+#
+# HONEST GAP #2 — self-hosted runners on a PUBLIC repo are a known GitHub security anti-
+# pattern IF they're reachable from pull_request-triggered workflows on fork branches
+# (arbitrary code execution on Daniel's hardware from an untrusted PR). This workflow only
+# triggers on tag push, which forks can't do — but the caution still belongs in the runbook:
+# never attach a self-hosted runner to a workflow that also runs on pull_request.
+#
+# prepublish_gate.py has the SAME portability note in a milder form: it only needs the ONE
+# repo it's checking (already present via checkout), so it runs fine on a normal hosted
+# runner without modification. It's smoke_from_dist.py's cross-repo design that's the gap.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version being released, e.g. 0.5.7 (must match the tag)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------------------
+  # Job 1 — prepublish_gate.py. Runs clean on a normal hosted runner: only checks THIS repo
+  # (dist-membership, wheel-vs-HEAD staleness, version agreement across pyproject/__init__/
+  # CHANGELOG). No cross-repo dependency. The one prerequisite: prepublish_gate.py itself
+  # needs to be reachable from this runner. It currently lives in velouria/scripts/, a
+  # private local-only repo with no GitHub remote — so it can't be `checkout`-ed from here as
+  # written. Options: (a) vendor a copy of the script into each arcaeon-* repo's own
+  # scripts/ or .github/ dir, (b) publish it as its own small pip-installable gate package
+  # (arcaeon-gate?) and `pip install` it here, or (c) push velouria (or an extracted subset)
+  # to a private GitHub repo and checkout with a PAT/deploy key. (a) is simplest and matches
+  # the "vendor small tools" pattern this line already uses; not yet decided.
+  # ---------------------------------------------------------------------------------------
+  prepublish-gate:
+    name: prepublish_gate.py
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # prepublish_gate reads HEAD commit time; full history is safest
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Run prepublish_gate.py
+        # See "HONEST GAP #1" prelude: this assumes the gate script has been vendored into
+        # this repo (e.g. tools/prepublish_gate.py) or pip-installed as a package. Neither is
+        # true yet — this step is illustrative until one of those lands.
+        run: |
+          VERSION="${{ github.event.inputs.version || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          python tools/prepublish_gate.py --repo . --version "$VERSION"
+
+  # ---------------------------------------------------------------------------------------
+  # Job 2 — smoke_from_dist.py, "real CI" shape: check out every arcaeon-* package repo as a
+  # sibling directory (mirroring what ARCAEON_ROOT expects locally), build each one's wheel,
+  # then run the (refactored, --root-parameterized) smoke script against the runner's own
+  # workspace instead of C:/Users/USER. Depends on prepublish-gate passing first.
+  # ---------------------------------------------------------------------------------------
+  smoke-from-dist:
+    name: smoke_from_dist.py (multi-repo)
+    needs: prepublish-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout arcaeon-ledger
+        uses: actions/checkout@v4
+        with:
+          path: arcaeon-ledger
+
+      # One checkout step per sibling package, mirroring KNOWN_ORDER in smoke_from_dist.py.
+      # Public repos, no token needed. Repeat this block (path only changes) for: baseline,
+      # compact, audit, once, dedup, distill, meter, continuity — omitted here for length;
+      # full list in CI_SETUP_2026-08-16.md.
+      - name: Checkout arcaeon-baseline
+        uses: actions/checkout@v4
+        with:
+          repository: Arcaeon-io/arcaeon-baseline
+          path: arcaeon-baseline
+      # ... (remaining 7 checkout steps: same shape, different repository/path)
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build every checked-out package
+        run: |
+          python -m pip install --upgrade pip build
+          for d in arcaeon-*; do
+            [ -f "$d/pyproject.toml" ] || continue
+            ( cd "$d" && python -m build )
+          done
+
+      - name: Run smoke_from_dist.py against this runner's workspace
+        # Prerequisite (not yet done): smoke_from_dist.py's ARCAEON_ROOT must become an env
+        # var / --root flag (currently hardcoded to C:/Users/USER) so it can point at
+        # $GITHUB_WORKSPACE here instead. Small, low-risk change; flagged, not made.
+        run: |
+          python velouria-scripts/smoke_from_dist.py --root "$GITHUB_WORKSPACE"
+
+  # ---------------------------------------------------------------------------------------
+  # Job 3 — publish. Gated behind both prior jobs AND a GitHub Environment requiring manual
+  # approval (create an environment named "pypi-publish" with Daniel as required reviewer;
+  # a tag push queues the job but it waits for his click before twine/gh-action-pypi-publish
+  # actually runs). Left fully commented — this is the piece that needs his decision:
+  #
+  #   Option A — PyPI Trusted Publishing (OIDC, recommended, no stored secret). One-time
+  #   setup per PyPI project: on pypi.org, each of the 9 arcaeon-* projects gets a Trusted
+  #   Publisher entry naming this repo + this workflow filename (+ optionally the
+  #   "pypi-publish" environment). No PYPI_API_TOKEN ever exists. Workflow needs
+  #   `permissions: id-token: write` and `uses: pypa/gh-action-pypi-publish@release/v1`.
+  #   Still requires Daniel to log into pypi.org and configure each project once — his call,
+  #   his account.
+  #
+  #   Option B — long-lived API token. Daniel generates a scoped-per-project token on
+  #   pypi.org, adds it as a repo (or environment) secret PYPI_API_TOKEN, workflow runs
+  #   `twine upload dist/* -u __token__ -p ${{ secrets.PYPI_API_TOKEN }}`. Simpler to wire,
+  #   worse hygiene (a long-lived credential sitting in GitHub secrets, one per repo if
+  #   scoped-per-project the way it should be).
+  #
+  #   Either way: 9 separate PyPI projects means either 9 Trusted Publisher configs or 9
+  #   scoped tokens — not one credential covering the whole line. That's on him to set up
+  #   regardless of which option he picks.
+  # ---------------------------------------------------------------------------------------
+  publish:
+    name: publish to PyPI (NOT WIRED — needs Daniel's token/OIDC decision)
+    needs: [prepublish-gate, smoke-from-dist]
+    runs-on: ubuntu-latest
+    environment: pypi-publish # create this environment + required reviewer before enabling
+    if: false # hard off-switch — remove only once the decision above is made
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      # --- Option A (Trusted Publishing) — uncomment once PyPI-side config is done ---
+      # permissions:
+      #   id-token: write
+      # - uses: pypa/gh-action-pypi-publish@release/v1
+      #
+      # --- Option B (token) — uncomment once PYPI_API_TOKEN secret exists ---
+      # - name: twine upload
+      #   env:
+      #     TWINE_USERNAME: __token__
+      #     TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      #   run: |
+      #     pip install twine
+      #     twine upload --non-interactive dist/*

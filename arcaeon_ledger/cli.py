@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """ledger CLI - verify or append from the command line.
 
     python -m arcaeon_ledger.cli verify agent.log.jsonl

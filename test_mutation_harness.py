@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for the mutation harness — including the meta-test: a harness that
 cannot itself be observed failing would be decoration by its own standard, so
 we sabotage a verifier and require the harness to go red.

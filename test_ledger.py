@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for ledger — the whole product claim is 'tamper-evident,' so the
 negative test (tampering is CAUGHT at the exact line) is the load-bearing one.
 Run: python test_ledger.py

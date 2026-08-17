@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """arcaeon_ledger.artefact — bind a re-fetchable fact to a ledger row.
 
 A hash chain proves a *record* wasn't altered. It does NOT prove the record was

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Tests for arcaeon_ledger.artefact — binding a re-fetchable fact to a row.
 
 The load-bearing claims: (1) digests are self-describing and reproducible from the

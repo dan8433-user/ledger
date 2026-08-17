@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Property-based / fuzzing hardening for arcaeon_ledger.
 
 Hand-written regression tests check the cases we already thought of. This file

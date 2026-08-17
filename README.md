@@ -133,6 +133,29 @@ Scoped honestly, the primitive is *"this file was not rewritten in place"* — s
 true, and testable. The layers above (external anchoring via `head()`, artefact
 binding, signed authorship) are how you extend it toward a full evidence claim.
 
+### verify() on missing or empty ledgers
+
+The two look like the same thing — "no data" — and `verify()` treats them as
+opposites, on purpose:
+
+```python
+Ledger("never/written.jsonl").verify()
+# VerifyResult(ok=False, rows=0, first_break="unreadable: [Errno 2] No such file...")
+
+open("touched/empty.jsonl", "w").close()
+Ledger("touched/empty.jsonl").verify()
+# VerifyResult(ok=True, rows=0, chained=0, first_break=None)
+```
+
+A path that was never created can't be vouched for — `ok=False`, "unreadable,"
+same as any other read failure. A path that exists and is genuinely empty has
+zero rows to tamper with, so there's nothing for the chain to disagree about —
+`ok=True, rows=0`. Automation that branches on `verify().ok` to decide "is this
+log intact" needs to check `first_break` (or catch the missing-file case
+upstream) if it also needs to distinguish "never existed" from "exists,
+legitimately empty" — `ok` alone collapses that distinction into two different
+answers, not one.
+
 ## Bind what the agent actually read (artefact-binding)
 
 The chain proves a row wasn't edited. It does **not** prove the row was ever *true* —

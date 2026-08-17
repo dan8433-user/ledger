@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Self-test: golden digest vectors, planted unsupported recipes, witness fixture.
 
     python -m arcaeon_ledger.selftest
