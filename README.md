@@ -90,9 +90,14 @@ with permission-replay. (Shipped in response to community feedback on launch.)
 The loudest unmet pain for agent builders in 2026 is the reliability/audit gap:
 an agent "completes" a task and the result is quietly wrong, and you can't
 reconstruct — or prove — what actually happened. Observability platforms trace
-runs; none give you a **tamper-evident, portable, ownable** record. Regulations
-(EU AI Act Art. 12, tamper-evident AI decision records) are starting to require
-exactly this. `arcaeon-ledger` is the smallest honest version: a cryptographically
+runs; none give you a **tamper-evident, portable, ownable** record. Regulation
+is arriving too: the EU AI Act requires high-risk systems to technically allow
+automatic recording of events over their lifetime (Art. 12(1)) and requires
+providers and deployers to keep those logs, to the extent under their control,
+for at least six months (Art. 19(1), Art. 26(6)). The Act mandates recording
+and retention — tamper-evidence is not its word, it is ours: when someone asks
+whether a retained log is still the log, that question needs an answer stronger
+than trust. `arcaeon-ledger` is the smallest honest version: a cryptographically
 chained action log you drop in, own, and verify.
 
 ## How the chain works
