@@ -30,13 +30,15 @@ about the boundary is the point:
     too. External head-anchoring is what a re-minter cannot advance.
   - Fabricated-legacy-prepend: rows with no `chain` field are tolerated BEFORE
     the first chained row (adoption-on-existing-log — real pre-chain history).
-    That toleration is also a hole: PREPEND fabricated unchained "legacy" rows
-    in front of a genuine chain and the file still verifies GREEN, because those
-    rows are counted as `prechain` and skipped, not verified. `verify()` exposes
-    the count via `prechain`, but the headline `ok`/`__bool__` ignore it. If your
-    log has been chained from genesis and must have NO legacy rows, pass
-    `verify(strict=True)`: it treats any unchained row as a break. (Inserting an
-    unchained row AFTER the chain begins is already flagged in every mode.)
+    Those rows are counted as `prechain` and skipped, not verified — and the
+    verifier cannot tell real legacy history from a fabricated prepend. So
+    (0.5.7) a non-strict verify that skipped any rows no longer mints a green:
+    `ok` is None ("no break found, verified within scope"), `__bool__` is falsy,
+    and `verified_scope` says "bounded_prechain_skipped" in-band. Only a scan
+    that checked EVERY row returns `ok=True`. If your log has been chained from
+    genesis and must have NO legacy rows, pass `verify(strict=True)`: it treats
+    any unchained row as a break. (Inserting an unchained row AFTER the chain
+    begins is already flagged in every mode.)
 
 TWO WRITE-SIDE BOUNDARIES, named because a cross-language verifier will meet them
 (audited 2026-08-14; both are on the writer, neither weakens `verify()` here):
@@ -75,7 +77,7 @@ try:                      # Windows byte-range locks
 except ImportError:       # pragma: no cover - platform dependent
     _msvcrt = None
 
-__version__ = "0.5.6"
+__version__ = "0.5.7"
 __all__ = ["Ledger", "VerifyResult", "verify_file", "chain_at", "authority", "Head",
            "bind_artefact", "verify_artefact", "digest_bytes", "digest_json",
            "WitnessStore", "publish_head", "verify_against_witness", "WitnessVerdict"]
@@ -216,7 +218,18 @@ def authority(principal: str, *, capability_version: str | None = None,
 
 @dataclass
 class VerifyResult:
-    ok: bool
+    # Three-valued since 0.5.7 (the continuity-0.2.0 idiom: never mint a bare
+    # green whose scope lives in a sibling field the reader isn't forced through):
+    #   True  — every row was verified. Full green.
+    #   None  — no break found, BUT unchained prechain rows were skipped
+    #           unverified (non-strict mode). "Verified within scope" is not
+    #           "verified"; the old ok=True here let a fabricated legacy prepend
+    #           ride a green the consumer's `if r.ok:` never questioned.
+    #   False — a break was found.
+    # A consumer that reads only `ok` now gets null/falsy on the bounded case —
+    # fail-safe — instead of a false green. The scope rides in-band in
+    # `verified_scope`; the skipped-row count stays in `prechain`.
+    ok: bool | None
     rows: int = 0
     chained: int = 0
     prechain: int = 0
@@ -227,9 +240,18 @@ class VerifyResult:
     # produce breaks == 1. A verifier that cascaded reported the same first_break
     # and was indistinguishable until this field existed.
     breaks: int = 0
+    # "full"                     — every parseable row was checked (strict mode
+    #                              always; non-strict when prechain == 0).
+    # "bounded_prechain_skipped" — non-strict verify skipped `prechain` unchained
+    #                              rows unverified; the verdict covers only the
+    #                              chained region. Set on failures too: a red over
+    #                              a bounded scan is still a bounded scan.
+    verified_scope: str = "full"
 
     def __bool__(self) -> bool:  # `if log.verify(): ...`
-        return self.ok
+        # Truthy ONLY on the full green. A bounded (ok=None) verification is
+        # falsy — fails safe, same as continuity's `faithful is True`.
+        return self.ok is True
 
 
 @dataclass
@@ -443,11 +465,19 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
     begun is itself a tamper signal. On a mismatch, verification continues from
     the CLAIMED value so later damage is counted honestly rather than cascading.
 
-    `strict=True` closes the fabricated-legacy-prepend hole: it treats ANY
-    unchained row as a break, so prepended fake "legacy" rows in front of a
-    genuine chain no longer verify green. Use it when the log is asserted to be
-    chained from genesis with no legitimate pre-chain history. The prechain
-    count is still reported either way; strict only decides whether it fails.
+    The verdict is three-valued and carries its scope (0.5.7):
+      ok=True,  verified_scope="full"                     — every row verified.
+      ok=None,  verified_scope="bounded_prechain_skipped" — no break found, but
+                `prechain` unchained rows were SKIPPED unverified (non-strict).
+                Falsy. Not a green: the verifier cannot distinguish real legacy
+                history from a fabricated prepend, so it does not claim to.
+      ok=False — a break was found (scope still says what was scanned).
+
+    `strict=True` closes the fabricated-legacy-prepend hole harder: it treats
+    ANY unchained row as a break, so prepended fake "legacy" rows in front of a
+    genuine chain fail red. Use it when the log is asserted to be chained from
+    genesis with no legitimate pre-chain history. The prechain count is still
+    reported either way; strict decides whether skipping is even allowed.
     """
     res = VerifyResult(ok=True)
     try:
@@ -531,6 +561,16 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
             res.first_break = res.first_break or f"line {i}: chain mismatch"
         prev = claimed
         res.chained += 1
+    # Scope stamping (0.5.7). In non-strict mode, skipped prechain rows bound
+    # the verdict: whatever the answer is, it covers only the chained region.
+    # And a green over a bounded scan is not a green — it becomes ok=None
+    # ("verified within scope"), so the fabricated-legacy-prepend can no longer
+    # ride a bare True past a consumer that reads only `ok`. Strict mode never
+    # skips (prechain rows are breaks there), so its scope is always "full".
+    if not strict and res.prechain:
+        res.verified_scope = "bounded_prechain_skipped"
+        if res.ok:
+            res.ok = None
     return res
 
 

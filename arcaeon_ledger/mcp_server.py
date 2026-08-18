@@ -6,7 +6,9 @@ rather than pulling the SDK (keeps the whole product install-free). Any MCP
 client (Claude Code, etc.) can wire it in and its agent gets two tools:
 
   ledger_append(record)  -> chain hash   (log an action, tamper-evidently)
-  ledger_verify()        -> verify result (prove the log wasn't altered)
+  ledger_verify(strict?) -> verify result (prove the log wasn't altered;
+                            ok true/null/false — null = prechain rows skipped,
+                            not a green; strict=true makes them hard failures)
 
 Run:  python -m arcaeon_ledger.mcp_server [--log PATH]
 Wire into an MCP client (e.g. Claude Code .mcp.json):
@@ -48,10 +50,26 @@ TOOLS = [
     },
     {
         "name": "ledger_verify",
-        "description": ("Verify the hash chain over the whole log. Returns ok + row "
-                        "counts, and names the exact line of the first break if the log "
-                        "was edited, had a row deleted, or was reordered."),
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": ("Verify the hash chain over the log. Returns a three-valued "
+                        "verdict: ok=true means EVERY row verified; ok=null means no "
+                        "break was found but unchained `prechain` rows were skipped "
+                        "UNVERIFIED (verified_scope='bounded_prechain_skipped' — "
+                        "treat as not-green); ok=false names the exact line of the "
+                        "first break (edit, deletion, reorder). Pass strict=true to "
+                        "make any unchained row a hard failure instead of a skip."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "strict": {
+                    "type": "boolean",
+                    "description": "Treat ANY unchained row as a break (closes the "
+                                   "fabricated-legacy-prepend hole). Default false: "
+                                   "unchained rows before the first chained row are "
+                                   "skipped, counted in `prechain`, and cap the "
+                                   "verdict at ok=null.",
+                },
+            },
+        },
     },
 ]
 
@@ -96,7 +114,7 @@ def handle(msg: dict, log: Ledger):
                 chain = log.append(record)
                 return _result(mid, _text_content({"ok": True, "chain": chain}))
             if name == "ledger_verify":
-                r = log.verify()
+                r = log.verify(strict=bool(args.get("strict")))
                 return _result(mid, _text_content(r.__dict__))
             return _result(mid, {**_text_content(
                 {"error": f"unknown tool {name}"}), "isError": True})

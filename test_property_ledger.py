@@ -293,7 +293,13 @@ def run_seeded_loop(n_iter=N_ITER, seed=SEED, verbose=False):
                 f"green on changed file. mutated={mutated!r}")
             tampers_caught += 1
             tampers_by_type[t.__name__] += 1
-            if r_def.ok:
+            # 0.5.7: default mode is three-valued. A semantic tamper must NEVER
+            # come back ok=True — the legacy-disguise now lands at ok=None
+            # (bounded verification, in-band scope), everything else at False.
+            assert r_def.ok is not True, (
+                f"DEFAULT minted a bare green on a tamper ({t.__name__}) "
+                f"it={it}: mutated={mutated!r}")
+            if r_def.ok is None:
                 # Permitted ONLY as the documented legacy-disguise: strict's
                 # break must be an unchained/prechain rejection, never a real
                 # chain mismatch that default somehow missed.
@@ -301,6 +307,8 @@ def run_seeded_loop(n_iter=N_ITER, seed=SEED, verbose=False):
                 assert ("unchained" in fb or "prechain" in fb), (
                     f"DEFAULT missed a non-legacy tamper ({t.__name__}) it={it}:"
                     f" strict break={fb!r} mutated={mutated!r}")
+                assert r_def.prechain >= 1
+                assert r_def.verified_scope == "bounded_prechain_skipped"
                 legacy_disguise += 1
             else:
                 assert r_def.breaks >= 1 and r_def.first_break

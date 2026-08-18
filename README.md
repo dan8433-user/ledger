@@ -30,11 +30,33 @@ Tampering is caught, not hoped against:
 log.verify()          # VerifyResult(ok=False, first_break="line 2: chain mismatch")
 ```
 
-CLI (wire it into CI or a pre-ship gate — a tampered log exits nonzero):
+CLI (wire it into CI or a pre-ship gate — a tampered log exits nonzero, and a
+log that could only be *partially* vouched for no longer exits like a fully
+verified one):
 
 ```
 python -m arcaeon_ledger.cli append agent.log.jsonl '{"tool":"search","ok":true}'
-python -m arcaeon_ledger.cli verify agent.log.jsonl        # exit 0 = intact, 1 = broken
+python -m arcaeon_ledger.cli verify agent.log.jsonl
+python -m arcaeon_ledger.cli verify --strict agent.log.jsonl
+```
+
+`verify` exit codes (0.5.7):
+
+| exit | meaning |
+|------|---------|
+| `0`  | fully verified — every row checked, chain intact (`ok: true`) |
+| `1`  | broken — a break was found (`ok: false`), or bad usage |
+| `3`  | verified **within scope** only — no break found, but unchained `prechain` rows were skipped unverified (`ok: null`, `verified_scope: "bounded_prechain_skipped"`). A fabricated "legacy" prepend lands here, never at 0. Pass `--strict` to make it a hard `1` instead. |
+
+A CI gate should treat only `0` as green:
+
+```sh
+python -m arcaeon_ledger.cli verify agent.log.jsonl
+case $? in
+  0) echo "fully verified" ;;
+  3) echo "chain intact but prechain rows skipped unverified — inspect, or use --strict" ; exit 1 ;;
+  *) echo "ledger broken" ; exit 1 ;;
+esac
 ```
 
 ## Prove *who* acted, not just the order
@@ -120,14 +142,16 @@ External head-anchoring (#1) is the thing a re-minter cannot advance.
 
 **4. Fabricated-legacy-prepend.** Rows with no `chain` field are tolerated *before*
 the first chained row — that is deliberate, so you can adopt the chain on top of an
-existing log without rewriting its history. The same toleration is a hole: prepend
-fabricated unchained "legacy" rows in front of a genuine chain and the file still
-verifies green, because those rows are counted as `prechain` and skipped. `verify`
-exposes the count in `prechain`, but the headline `ok` ignores it. If your log is
-chained from genesis and must have no legitimate legacy rows, pass
-`verify(strict=True)` — it treats any unchained row as a break, so a prepended fake
-cannot ride in green. (An unchained row inserted *after* the chain begins is already
-flagged in every mode.)
+existing log without rewriting its history. But skipped rows are *unverified* rows,
+and the verifier cannot tell real legacy history from a fabricated prepend. So
+(0.5.7) a non-strict verify that skipped any rows never mints a green: `ok` is
+`None` — "no break found, verified within scope" — falsy, with the scope in-band
+(`verified_scope: "bounded_prechain_skipped"`) and the count in `prechain`; the CLI
+exits `3`, not `0`. Only a scan that checked every row returns `ok=True`. If your
+log is chained from genesis and must have no legitimate legacy rows, pass
+`verify(strict=True)` / `--strict` — it treats any unchained row as a break, hard
+red. (An unchained row inserted *after* the chain begins is already flagged in
+every mode.)
 
 Scoped honestly, the primitive is *"this file was not rewritten in place"* — small,
 true, and testable. The layers above (external anchoring via `head()`, artefact
@@ -189,9 +213,20 @@ from arcaeon_ledger import verify_artefact
 
 verify_artefact(art)                    # recipe reproducible + string self-consistent
 verify_artefact(art, refetch=True)      # for a URL: re-fetch and compare
-# -> {"digest_ok": True, "reason": None,
+# -> {"verdict": "live_match",          # <- THE answer; read this field
+#     "digest_ok": True, "reason": None,
 #     "refetch": "match" | "mismatch" | "unavailable" | "skipped", "notes": [...]}
 ```
+
+**Read `verdict`, not just `digest_ok` (0.5.7).** `digest_ok` names only the
+*offline* leg — recipe reproducible, string self-consistent — and it stays `True`
+even when a live re-fetch disagrees. The top-level `verdict` tag mints the whole
+answer in one field: `"digest_consistent"` (offline leg passed, no live comparison
+made), `"live_match"`, `"live_mismatch"` (live content no longer matches —
+changed *or* tampered, indeterminate), `"live_unavailable"` (the requested live
+check could not run), or the typed failure reason itself when the offline leg
+fails. `if out["digest_ok"]` after `refetch=True` used to read green through a
+live mismatch; `out["verdict"] == "live_match"` cannot.
 
 **A label this build cannot reproduce is a typed failure, never a pass.** If the
 digest names an algorithm, recipe, or recipe *version* outside the supported
@@ -269,9 +304,14 @@ etc.) can give its agent tamper-evident logging with no code. Wire it in:
 ```
 
 The agent then has two tools: `ledger_append(record)` to log an action
-(returns its chain hash) and `ledger_verify()` to prove the whole log is
-intact (or get the exact tampered line back). MCP is JSON-RPC over stdio and
-this server speaks it directly — no SDK, no extra install.
+(returns its chain hash) and `ledger_verify(strict?)` to prove the log is
+intact (or get the exact tampered line back). The verify verdict is
+three-valued, same as the library: `ok: true` = every row verified,
+`ok: null` = chain intact but unchained `prechain` rows were skipped
+unverified (`verified_scope: "bounded_prechain_skipped"` — not a green),
+`ok: false` = broken. Pass `strict: true` to make any unchained row a hard
+failure. MCP is JSON-RPC over stdio and this server speaks it directly — no
+SDK, no extra install.
 
 ## Status
 

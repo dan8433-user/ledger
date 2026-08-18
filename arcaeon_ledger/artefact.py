@@ -278,18 +278,39 @@ def verify_artefact(artefact: dict, *, refetch: bool = False,
     "match" for an artefact whose recipe was not verified.
 
     Returns:
-        {"digest_ok": bool,               # recipe reproducible + string self-consistent
+        {"verdict": <str, see below>,     # THE top-level answer — read this one
+         "digest_ok": bool,               # the OFFLINE leg only: recipe reproducible
+                                          #   + string self-consistent. NOT the whole
+                                          #   verdict — it stays True even when a live
+                                          #   re-fetch disagrees.
          "reason": None | <one of FAILURE_REASONS>,   # typed failure, None when ok
          "recipe": "<algo:recipe:ver>",
          "refetch": "match|mismatch|unavailable|skipped",
          "notes": [<str>, ...]}
+
+    `verdict` (0.5.7) is a single in-band tag minted from the (digest_ok,
+    refetch) pair, so the response's one boolean can never be its only signal:
+      - a FAILURE_REASONS value    — digest_ok=False, typed failure (offline leg
+                                     failed; re-fetch never ran)
+      - "digest_consistent"        — digest_ok=True, no live comparison was made
+                                     (refetch not requested, or not applicable)
+      - "live_match"               — digest_ok=True AND re-fetched bytes reproduce
+                                     the digest
+      - "live_mismatch"            — digest_ok=True BUT the live content no longer
+                                     matches (changed or tampered — INDETERMINATE)
+      - "live_unavailable"         — digest_ok=True but the requested live check
+                                     could not run (fetch failed / cap exceeded)
+    A lazy consumer's `if out["digest_ok"]:` used to read green through a live
+    mismatch; the honest read is `out["verdict"] == "live_match"` (or
+    "digest_consistent" when offline-only was all that was asked).
     """
     notes: list[str] = []
-    out = {"digest_ok": False, "reason": None, "recipe": None,
+    out = {"verdict": None, "digest_ok": False, "reason": None, "recipe": None,
            "refetch": "skipped", "notes": notes}
 
     def fail(reason: str, note: str) -> dict:
         out["reason"] = reason
+        out["verdict"] = reason      # the typed failure IS the verdict, in-band
         notes.append(note)
         return out
 
@@ -352,6 +373,11 @@ def verify_artefact(artefact: dict, *, refetch: bool = False,
                     "subject.digest.sha256 does not match the digest string's hex")
 
     out["digest_ok"] = True
+    # Offline leg passed. Until a live comparison actually runs, the verdict is
+    # exactly that — "digest_consistent" — never anything stronger. Every path
+    # below that DOES run one overwrites this with the live answer, so the
+    # top-level tag always says whether the bytes were re-checked.
+    out["verdict"] = "digest_consistent"
 
     if not refetch:
         return out
@@ -374,18 +400,24 @@ def verify_artefact(artefact: dict, *, refetch: bool = False,
             body = r.read(fetch_cap + 1)
         if len(body) > fetch_cap:
             out["refetch"] = "unavailable"
+            out["verdict"] = "live_unavailable"
             notes.append("re-fetched artefact exceeds fetch_cap; cannot compare")
             return out
         now_hex = hashlib.sha256(body).hexdigest()
     except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
         out["refetch"] = "unavailable"
+        out["verdict"] = "live_unavailable"
         notes.append(f"could not re-fetch ({e}); mismatch NOT implied")
         return out
 
     if now_hex.casefold() == hexd.casefold():
         out["refetch"] = "match"
+        out["verdict"] = "live_match"
     else:
         out["refetch"] = "mismatch"
+        # The top-level tag carries the disagreement where a lazy consumer
+        # reads; digest_ok stays True because the OFFLINE leg it names did pass.
+        out["verdict"] = "live_mismatch"
         notes.append("re-fetched bytes differ from the bound digest. This means the "
                      "content CHANGED or was tampered — INDETERMINATE. Not proof of tampering.")
     return out

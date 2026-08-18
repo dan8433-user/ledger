@@ -279,9 +279,9 @@ def test_concurrent_appends_do_not_fork_or_lose_rows():
 # --------------------------------------------------------------------------
 
 def test_strict_mode_rejects_prepended_fabricated_legacy_row():
-    """A fabricated unchained row prepended before a genuine chain verifies
-    GREEN by default (tolerated as pre-chain legacy) but must be a break under
-    strict=True. The default path stays green and exposes prechain=1."""
+    """A fabricated unchained row prepended before a genuine chain is capped at
+    ok=None by default (0.5.7: bounded verification, no longer a bare green)
+    and must be a break under strict=True."""
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "log.jsonl"
         led = Ledger(p)
@@ -292,7 +292,10 @@ def test_strict_mode_rejects_prepended_fabricated_legacy_row():
         p.write_text(fake + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
 
         default = verify_file(p)
-        assert default.ok and default.prechain == 1, default
+        # 0.5.7: no break found, but the scan was bounded — never ok=True.
+        assert default.ok is None and default.prechain == 1, default
+        assert default.verified_scope == "bounded_prechain_skipped", default
+        assert not default  # falsy: a bounded verdict is not a green
 
         strict = verify_file(p, strict=True)
         assert not strict.ok, "strict mode passed a prepended fabricated legacy row"
@@ -418,6 +421,141 @@ def test_chain_hash_matches_frozen_wire_format_vector():
     assert _chain(_CHAIN_VECTOR_1_PREV, _CHAIN_VECTOR_1_ROW) == _CHAIN_VECTOR_1_HASH
     assert _chain(_CHAIN_VECTOR_2_PREV, _CHAIN_VECTOR_2_ROW) == _CHAIN_VECTOR_2_HASH
     assert _chain(_CHAIN_VECTOR_3_PREV, _CHAIN_VECTOR_3_ROW) == _CHAIN_VECTOR_3_HASH
+
+
+# --------------------------------------------------------------------------
+# 7. 0.5.7 — verification verdicts carry their scope (the bare green is
+#    unobtainable). Class identified by ColonistOne's 2026-08-17 verdict-field
+#    audit; found in this package by the same lens (self-audit finding 1 HIGH,
+#    finding 2 MEDIUM).
+# --------------------------------------------------------------------------
+
+def _prepend_fake_legacy(p: Path) -> None:
+    """Build a genuine 2-row chain at `p`, then prepend a fabricated unchained
+    'legacy' row — the exact false-green input from the audit."""
+    led = Ledger(p)
+    led.append({"tool": "real", "amount": 1})
+    led.append({"tool": "real", "amount": 2})
+    lines = p.read_text(encoding="utf-8").splitlines()
+    fake = json.dumps({"tool": "INJECTED_fake_history", "amount": 9999})
+    p.write_text(fake + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_fabricated_prepend_nonstrict_is_bounded_not_green(capsys):
+    """(a) The HIGH finding's false-green path, closed. A fabricated prepend
+    under DEFAULT verify must no longer produce a clean green anywhere a
+    consumer reads: library `ok` is None (falsy), the in-band scope says
+    bounded, and the CLI exits 3 — never 0 — so the documented CI wiring
+    fails loud instead of passing a fabricated history."""
+    from arcaeon_ledger.cli import main as cli_main
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "log.jsonl"
+        _prepend_fake_legacy(p)
+
+        # library shape: three-valued, scope in-band, falsy
+        r = verify_file(p)
+        assert r.ok is None, r
+        assert r.verified_scope == "bounded_prechain_skipped", r
+        assert r.prechain == 1 and r.breaks == 0, r
+        assert not r, "bounded verification must be falsy"
+
+        # CLI: distinct exit code 3, JSON report carries the scope
+        code = cli_main(["verify", str(p)])
+        assert code == 3, f"non-strict CLI on skipped rows must exit 3, got {code}"
+        report = json.loads(capsys.readouterr().out)
+        assert report["ok"] is None
+        assert report["verified_scope"] == "bounded_prechain_skipped"
+        assert report["prechain"] == 1
+
+        # a fully-chained log still earns the full green + exit 0
+        p2 = Path(d) / "clean.jsonl"
+        Ledger(p2).append({"n": 1})
+        r2 = verify_file(p2)
+        assert r2.ok is True and r2.verified_scope == "full" and r2
+        assert cli_main(["verify", str(p2)]) == 0
+
+
+def test_fabricated_prepend_strict_hard_fails_cli_and_mcp(capsys):
+    """(b) strict is now REACHABLE from both operational surfaces and hard-fails
+    the same input: CLI --strict exits 1; the MCP verify tool accepts
+    strict:true and reports ok=false with a named prechain break."""
+    from arcaeon_ledger.cli import main as cli_main
+    from arcaeon_ledger.mcp_server import handle
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "log.jsonl"
+        _prepend_fake_legacy(p)
+
+        # CLI --strict: hard fail, exit 1
+        code = cli_main(["verify", "--strict", str(p)])
+        assert code == 1, f"--strict on a fabricated prepend must exit 1, got {code}"
+        report = json.loads(capsys.readouterr().out)
+        assert report["ok"] is False and report["breaks"] == 1
+        assert "prechain" in report["first_break"]
+        assert report["verified_scope"] == "full"  # strict skips nothing
+
+        # MCP tool: strict arg wired through schema + handler
+        msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "ledger_verify", "arguments": {"strict": True}}}
+        resp = handle(msg, Ledger(p))
+        payload = json.loads(resp["result"]["content"][0]["text"])
+        assert payload["ok"] is False and "prechain" in payload["first_break"]
+
+        # and the MCP default (non-strict) reports the bounded shape, not green
+        msg["params"]["arguments"] = {}
+        payload = json.loads(handle(msg, Ledger(p))["result"]["content"][0]["text"])
+        assert payload["ok"] is None
+        assert payload["verified_scope"] == "bounded_prechain_skipped"
+
+        # the schema itself must offer strict, or clients can't ask for it
+        from arcaeon_ledger.mcp_server import TOOLS
+        verify_tool = next(t for t in TOOLS if t["name"] == "ledger_verify")
+        assert "strict" in verify_tool["inputSchema"]["properties"]
+
+
+def test_verify_artefact_refetch_mismatch_carries_verdict_tag(monkeypatch):
+    """(c) The MEDIUM finding: digest_ok=True must no longer be the only
+    signal. A live refetch mismatch lands in the top-level `verdict` tag where
+    a lazy consumer reads; every other path mints its own tag too."""
+    import arcaeon_ledger.artefact as artefact_mod
+
+    art = bind_artefact(b"the bytes the agent originally read")
+    # make it look like a URL artefact so the refetch stage runs
+    art["subject"]["name"] = "https://example.invalid/pricing"
+
+    class _FakeResp:
+        def __init__(self, body): self._body = body
+        def read(self, n=-1): return self._body
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    # live content DIFFERS from the bound digest -> mismatch
+    monkeypatch.setattr(artefact_mod.urllib.request, "urlopen",
+                        lambda req, timeout=30: _FakeResp(b"CHANGED content"))
+    out = verify_artefact(art, refetch=True)
+    assert out["digest_ok"] is True          # the offline leg did pass...
+    assert out["refetch"] == "mismatch"
+    assert out["verdict"] == "live_mismatch"  # ...and the top level says so
+
+    # live content matches -> live_match
+    monkeypatch.setattr(artefact_mod.urllib.request, "urlopen",
+                        lambda req, timeout=30:
+                        _FakeResp(b"the bytes the agent originally read"))
+    assert verify_artefact(art, refetch=True)["verdict"] == "live_match"
+
+    # fetch failure -> live_unavailable, never a stronger claim
+    def _boom(req, timeout=30):
+        raise artefact_mod.urllib.error.URLError("down")
+    monkeypatch.setattr(artefact_mod.urllib.request, "urlopen", _boom)
+    assert verify_artefact(art, refetch=True)["verdict"] == "live_unavailable"
+
+    # offline-only -> digest_consistent; typed failure -> the reason IS the tag
+    clean = bind_artefact(b"plain bytes")
+    assert verify_artefact(clean)["verdict"] == "digest_consistent"
+    bad = json.loads(json.dumps(clean))
+    bad["digest"] = bad["digest"].replace("sha256", "md5", 1)
+    out = verify_artefact(bad)
+    assert out["digest_ok"] is False
+    assert out["verdict"] == out["reason"] == "unknown_algorithm"
 
 
 if __name__ == "__main__":
