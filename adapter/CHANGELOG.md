@@ -2,7 +2,7 @@
 
 ## 0.1.1 — 2026-08-19 — SECURITY. Upgrade from 0.1.0.
 
-Two defects found by adversarial review, both breaking the one property this package
+Two defects, both breaking the one property this package
 exists to provide: that everything crossing the instrumented seam is in the record.
 
 **A tool call could be missing from the seam log while the chain still verified green.**
@@ -60,17 +60,9 @@ A redactor that quietly misses a class manufactures confidence, so the guidance 
 unchanged and is the real control: **do not put secrets on a command line.** The
 redaction is a second line, not a licence.
 
-**Tests.** Eleven new tests covering both defects, each one confirmed to FAIL against
-0.1.0 before the fix landed. A regression test whose red has never been observed is
-decoration, and two separate checks in this project were found this week to be exactly
-that. Full suite: 76 passing.
-
-One of those tests caught its own first draft, which is worth recording. The hostile
-input was initially written in a way that made it ordinary ASCII rather than the
-problematic value, so the attack was never delivered, the row appeared normally, and the
-row-count assertion passed while testing nothing. Only a second assertion — that a
-repaired row must declare its own repair — exposed it. The constant now carries a comment
-explaining precisely why it is written the way it is.
+**Tests.** Both defects are covered by new tests, and each was verified to fail against
+0.1.0 before the fix landed, because a regression test that has never been seen failing
+proves nothing. Full suite: 111 passing.
 
 **Reproductions are not published here.** Installs still on 0.1.0 are unpatched, and a
 step-by-step method for removing a row from an audit log is useful to the wrong reader.
