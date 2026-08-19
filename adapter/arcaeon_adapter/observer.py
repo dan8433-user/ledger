@@ -232,7 +232,7 @@ class SeamObserver:
         try:
             self._emit(row)
         except Exception as first:
-            repaired = _escape_unencodable(row)
+            repaired: dict = _escape_unencodable(row)
             repaired["record_repair"] = f"unencodable_text_escaped:{type(first).__name__}"
             try:
                 self._emit(repaired)
@@ -252,8 +252,17 @@ class SeamObserver:
                     self._emit(skeleton)
                     row = skeleton
                 except Exception:
+                    # Count it AND re-raise. The counter is for the reader of the log;
+                    # the raise is for the caller, and `test_emit_failure_does_not_
+                    # propagate_out_of_the_relay_path` is right to insist on it. If the
+                    # observer absorbed a hard write failure quietly, the swallow in
+                    # `relay` would stop being a deliberate policy and start being
+                    # accidental silence — and silence is what let the surrogate bug
+                    # hide in the first place. `relay` still catches this, so transport
+                    # is unaffected; the difference is that a store which cannot write
+                    # at all now says so in both directions instead of neither.
                     self.rows_unlogged += 1
-                    return row
+                    raise
         self.rows += 1
         return row
 
@@ -427,7 +436,7 @@ def _safe_digest(value: Any) -> str | None:
         return f"undigestible:{type(e).__name__}"
 
 
-def _escape_unencodable(value):
+def _escape_unencodable(value: Any) -> Any:
     """Rewrite any text that UTF-8 cannot encode into an escaped, encodable form.
 
     Why this exists: JSON permits `\\udXXX` escapes, so a frame can legally carry a
