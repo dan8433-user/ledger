@@ -23,7 +23,7 @@
 
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir arcaeon-ledger==0.5.7
+RUN pip install --no-cache-dir arcaeon-ledger==0.5.8
 
 WORKDIR /app
 
