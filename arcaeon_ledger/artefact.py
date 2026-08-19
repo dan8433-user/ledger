@@ -33,7 +33,24 @@ Two honest limits, stated up front because being precise about them IS the point
      is unambiguous across languages. This is our own pinned, versioned recipe — it
      is deliberately NOT labelled RFC 8785 (JCS), because a stdlib serialization is
      not bit-for-bit JCS on every float edge case, and claiming a standard we don't
-     exactly meet is the kind of overclaim this whole library exists to refuse. The
+     exactly meet is the kind of overclaim this whole library exists to refuse.
+
+     A SECOND, MORE LIKELY DIVERGENCE, measured 2026-08-19 and worth naming because
+     it is far easier to hit than a float edge case: **key ordering above the BMP.**
+     RFC 8785 sorts object keys by their UTF-16 code UNITS; Python's `sort_keys`
+     sorts by Unicode CODE POINT. Supplementary-plane characters (U+10000 and above)
+     encode in UTF-16 as surrogate pairs in D800-DFFF, which sort BELOW the BMP range
+     E000-FFFF. So for an object with both an emoji key and a high-BMP key, JCS and
+     this recipe order them oppositely and produce DIFFERENT DIGESTS FOR THE SAME
+     LOGICAL OBJECT. Verified: `{"\U0001F600":1, "ﬀ":2}` canonicalizes here as
+     [U+FB00, U+1F600] and under JCS as [U+1F600, U+FB00]. Any key containing an
+     emoji is enough to trigger it, which is not exotic in agent logs.
+     `test_canonicalization_divergence.py` pins this as a KNOWN, TESTED property
+     rather than a lurking surprise: it is a real limit of `json-c14n:v1`, not a bug
+     to quietly fix, because fixing it would change every historical digest. A
+     JCS-exact rule would have to mint `v2` and leave `v1` rows alone.
+
+     The
      recipe is frozen: `v1` never changes; a future rule would mint `v2`, and old
      rows keep `v1` forever, so a drifted canonicalizer never reads history as
      tampered.
