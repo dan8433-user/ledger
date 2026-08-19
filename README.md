@@ -119,9 +119,18 @@ cascading one break into noise.
 ## What it proves — and the five things it doesn't
 
 Being precise here is the product, not a disclaimer. A hash chain proves the
-recorded bytes were not altered *in place* after writing: mid-file edit, delete,
-and reorder all break it and `verify` names the row. It does **not** by itself
-prove five other things:
+recorded *content* of each row was not altered **in place** after writing:
+mid-file edit, delete, and reorder all break it and `verify` names the row.
+
+One word in that sentence changed in 0.5.8, and the reason is the kind of thing
+this section exists for. It used to say "the recorded **bytes**", which claims
+more than the chain does. The chain is computed over each row parsed back from the
+file, and the reader normalises byte sequences it cannot decode — so two different
+byte strings inside such a region read identically and produce the same verdict.
+What is protected is the meaning of every row, not the exact bytes of the file. If
+you need byte-level custody, hash the file itself alongside this.
+
+It does **not** by itself prove five other things:
 
 **1. Truncation.** Lop off the most recent rows and what remains verifies clean —
 no append-only chain catches this alone. Close it by publishing the head somewhere

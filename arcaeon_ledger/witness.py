@@ -68,8 +68,22 @@ class WitnessStore:
     """Reference witness: an append-only, file-backed store of head pins.
 
     Holds only fingerprints, never log content. One JSONL file; each line is a
-    recorded pin `{namespace, rows, chain, as_of, received_at}`. Append-only, so
-    the witness's own record is itself tamper-evident by inspection.
+    recorded pin `{namespace, rows, chain, as_of, received_at}`.
+
+    WHAT THIS STORE DOES NOT DO, corrected in 0.5.8. It previously said the record
+    was "tamper-evident by inspection" because it is written append-only. That was
+    wrong, and wrong in the direction this library exists to refuse. `record()` writes
+    a plain JSON line with NO chain, NO digest and NO signature, and `latest()` simply
+    takes the last matching line. Append-only describes how this class writes; it is
+    not a property of the file, and nothing here detects a pin that was edited
+    afterwards. A witness file an attacker can write to is not evidence.
+
+    The protection is therefore ENTIRELY the independence of the host: a pin is worth
+    exactly as much as the separation between whoever holds it and whoever wrote the
+    log. Put the store somewhere the logging party cannot reach. Two further limits
+    worth knowing before you rely on one: a pin constrains nothing about rows appended
+    after it was taken, and a pin recorded over an empty log constrains nothing at
+    all.
 
     A hosted witness (Stage 0) is an HTTP endpoint wrapping this: POST a pin ->
     `record`, GET the latest -> `latest`. Running it in-process, as the tests and
