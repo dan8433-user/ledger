@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-08-19 — `arcaeon-adapter` moves into this repo, and completeness is named as the fifth gap
+
+Repo-level change, no ledger version bump. Two things landed together because they are the same point.
+
+- **The README's honesty list was incomplete.** It named four things a hash chain does not prove and omitted the structural one: *the agent decides what to call `append` on*, so a tamper-evident log of self-reported calls is still self-report. Nothing inside this library can close that, because anything the agent invokes it can decline to invoke. Gap **#5, Completeness**, now says so plainly and points at the closer. A disclaimer list that omits the biggest disclaimer is worse than no list, because it reads as exhaustive.
+- **`arcaeon-adapter` now lives at `adapter/`** rather than in its own repository, and is published to PyPI as `arcaeon-adapter` **0.1.0**. It is a stdio proxy that forwards JSON-RPC byte-for-byte between an MCP client and server and writes one hash-chained row per `tools/call` to its own ledger, in a separate OS process the agent does not own, cannot skip, and cannot see. Wrapping it around *this* package's own MCP server produced the number that makes the argument: the server's own diary wrote **0 rows** while the seam log captured **5**.
+- **Why the same repo, deliberately:** the adapter is the companion half of one claim rather than a separate product; several distribution directories key off a single repository URL; and splitting related packages across fresh zero-star repos is the exact pattern curated lists auto-reject as coordinated self-promotion (verbatim from `vinta/awesome-python`'s automatic-rejection rules, checked 2026-08-19). Concentrating is worth more than fragmenting when the scarce asset is credibility, not shelf space.
+
+Gates at the time of publish: ledger suite **99 passed**; adapter **65 passed** from its new location; adapter selftest **6/6 with every check observed failing on its own injected defect**. `pip install arcaeon-adapter` verified against live PyPI, not inferred from the upload receipt.
+
 ## 0.5.7 (also) — 2026-08-18 — `python -m arcaeon_ledger.bundle`: one-command auditor evidence bundle
 
 Adapter #3 from the 2026-08-18 AI-Act clause-read (founder directive 12396): "we already hold every ingredient; nothing assembles them." Now something does.
