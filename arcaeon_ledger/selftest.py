@@ -36,7 +36,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import Ledger, bind_artefact, digest_bytes, digest_json, verify_artefact
+from . import (Ledger, bind_artefact, digest_bytes, digest_json,
+               verify_artefact, verify_file)
 from .witness import WitnessStore, publish_head, verify_against_witness
 
 # Frozen at recipe freeze (json-c14n:v1 / raw-bytes:v1, 0.3.0, 2026-08-13).
@@ -168,6 +169,127 @@ def run() -> int:
         ok = v.verdict == "consistent" and bool(led.verify())
         failures += 0 if ok else 1
         print(f"  {'PASS' if ok else 'FAIL'}  untouched             -> {v.verdict!r} (must be 'consistent')")
+
+    print("== planted ledger tampering (THE CENTRAL CLAIM, observed) ==")
+    # Why this section exists, and why it is shaped the way it is.
+    #
+    # An adversarial review replaced verify_file's entire body with a stub returning
+    # ok=True for every file, and this selftest printed ALL CHECKS PASSED and exited 0.
+    # The proof a buyer runs to check their install did not exercise tamper detection
+    # at ALL: the witness branches above compare row counts and chain_at values, and
+    # branch C's `bool(led.verify())` is satisfied by any truthy stub.
+    #
+    # So each case below demands the EXACT first_break string, not merely a red. That
+    # is the part that cannot be faked: a stub returning a constant ok=False with a
+    # constant message satisfies at most one of these and fails the rest, and the GREEN
+    # control immediately below fails any stub that is red-by-default. Both directions
+    # are pinned, which is the only way a check earns the right to be believed.
+    #
+    # Every mutation is also guarded against not mutating. A tamper that silently
+    # no-ops looks identical to a detection that worked, and reporting the second when
+    # the first happened is how a suite accumulates checks that cannot fail.
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+
+        def fresh(name, n=6):
+            p = td / name
+            lg = Ledger(p)
+            for i in range(n):
+                lg.append({"action": "tool_call", "n": i, "amount": 100 + i})
+            return p
+
+        def lines_of(p):
+            return [l for l in p.read_text(encoding="utf-8").split("\n") if l.strip()]
+
+        def check_red(name, p, before, want_break):
+            """Require a red naming the exact line, and require the tamper to be real."""
+            nonlocal failures
+            if p.read_bytes() == before:
+                failures += 1
+                print(f"  FAIL  {name}: TAMPER DID NOT TAMPER (file unchanged) — "
+                      f"nothing was tested")
+                return
+            r = verify_file(p)
+            ok = r.ok is False and r.first_break == want_break
+            failures += 0 if ok else 1
+            print(f"  {'PASS' if ok else 'FAIL'}  {name} -> ok={r.ok!r} "
+                  f"first_break={r.first_break!r} (must be {want_break!r})")
+
+        # GREEN CONTROL FIRST. Without it, a verifier that is red-by-default passes
+        # every case below, which is the mirror image of the defect this section fixes.
+        clean = fresh("clean.jsonl")
+        r = verify_file(clean)
+        ok = r.ok is True and r.rows == 6 and r.breaks == 0 and r.verified_scope == "full"
+        failures += 0 if ok else 1
+        print(f"  {'PASS' if ok else 'FAIL'}  GREEN control: untouched 6-row log -> "
+              f"ok={r.ok!r} rows={r.rows} scope={r.verified_scope!r}")
+
+        # 1. Edit a field in place. The canonical tamper.
+        p = fresh("edited.jsonl"); before = p.read_bytes()
+        ls = lines_of(p)
+        obj = json.loads(ls[2]); obj["amount"] = 999999
+        ls[2] = json.dumps(obj, ensure_ascii=False)
+        p.write_text("\n".join(ls) + "\n", encoding="utf-8")
+        check_red("edit row 3 in place", p, before, "line 3: chain mismatch")
+
+        # 2. Delete a row from the middle.
+        p = fresh("deleted.jsonl"); before = p.read_bytes()
+        ls = lines_of(p); del ls[2]
+        p.write_text("\n".join(ls) + "\n", encoding="utf-8")
+        check_red("delete row 3", p, before, "line 3: chain mismatch")
+
+        # 3. Reorder. Same bytes, different history.
+        p = fresh("reordered.jsonl"); before = p.read_bytes()
+        ls = lines_of(p); ls[1], ls[3] = ls[3], ls[1]
+        p.write_text("\n".join(ls) + "\n", encoding="utf-8")
+        check_red("swap rows 2 and 4", p, before, "line 2: chain mismatch")
+
+        # 4. A torn final row: what a crash mid-append leaves behind.
+        p = fresh("torn.jsonl"); before = p.read_bytes()
+        raw = p.read_text(encoding="utf-8")
+        p.write_text(raw[:-14], encoding="utf-8")
+        check_red("torn final row", p, before, "line 6: unparseable")
+
+        # 5. A bare scalar smuggled in. Before 0.5.3 this CRASHED the verifier
+        #    instead of returning a verdict; it must stay a named break forever.
+        p = fresh("scalar.jsonl"); before = p.read_bytes()
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write("42\n")
+        check_red("bare scalar line appended", p, before, "line 7: not a JSON object")
+
+        # 6. An unchained row after the chain began — the detach precursor.
+        p = fresh("unchained.jsonl"); before = p.read_bytes()
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"action": "sneak", "n": 99}) + "\n")
+        check_red("unchained row after the chain began", p, before,
+                  "line 7: unchained row after chain began")
+
+        # 7. An EMPTY file must not be a green. 0.5.7 and earlier returned
+        #    ok=True/"full" here, and build_bundle printed "VERDICT: intact" over it.
+        empty = td / "empty.jsonl"
+        empty.write_text("", encoding="utf-8")
+        r = verify_file(empty)
+        rs = verify_file(empty, strict=True)
+        ok = (r.ok is None and r.verified_scope == "empty" and not r
+              and rs.ok is None and not rs)
+        failures += 0 if ok else 1
+        print(f"  {'PASS' if ok else 'FAIL'}  empty file is NOT a green -> ok={r.ok!r} "
+              f"scope={r.verified_scope!r} bool={bool(r)} (strict: ok={rs.ok!r})")
+
+        # 8. A write that goes nowhere must raise, not return a chain hash. On
+        #    Windows a reserved device name accepts every write and stores nothing.
+        if sys.platform == "win32":
+            try:
+                Ledger(td / "nul").append({"action": "wire_money", "amount": 50000})
+                failures += 1
+                print("  FAIL  write to a reserved device name -> returned success; "
+                      "the row was discarded and nothing said so")
+            except OSError as e:
+                print(f"  PASS  write to a reserved device name -> "
+                      f"{type(e).__name__} (nothing silently discarded)")
+        else:
+            print("  SKIP  reserved-device-name check (Windows only) — "
+                  "this is a real gap in coverage on this platform, not a pass")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else f'{failures} CHECK(S) FAILED'}")
     return 0 if failures == 0 else 1
