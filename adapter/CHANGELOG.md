@@ -44,10 +44,20 @@ would have been the quieter bug, pinning something that never executed.
 **The redactor's limits, stated here rather than implied away.** It recognises a value
 sitting in a credential-named flag, a value whose own shape is a known credential kind, a
 credential inside a URL query string, and URL userinfo. It cannot recognise an
-arbitrarily-named flag holding a secret, and it does not read the environment, which is
-where a wrapped server's secrets more often live and which this package never logs. A
-redactor that quietly misses a class is more dangerous than none, because it manufactures
-confidence — so the guidance is unchanged: **do not put secrets on a command line.** The
+arbitrarily-named slot (`--k9 hunter2`), and it cannot recognise a bare high-entropy
+value sitting in no slot at all with no known prefix.
+
+**One distinction stated explicitly, because getting it wrong is how the first cut
+leaked.** This function reads `argv` only. A secret passed through the actual process
+environment is never seen by it and is never logged by this package either. But
+`-e NAME=VALUE` is **argv, not the environment** — it is how `docker run`, `env`, and
+most MCP client configs pass secrets, and it IS covered. An earlier draft of this note
+said the redactor "does not read the environment" without drawing that line, which reads
+as "that case is out of scope." It was not out of scope; it was the largest hole, and the
+sentence pointed away from it. A limitation notice that misdirects is worse than none.
+
+A redactor that quietly misses a class manufactures confidence, so the guidance is
+unchanged and is the real control: **do not put secrets on a command line.** The
 redaction is a second line, not a licence.
 
 **Tests.** Eleven new tests covering both defects, each one confirmed to FAIL against

@@ -356,87 +356,156 @@ def _digest(value) -> str:
     return digest_json(value)
 
 
-#: Argv flag names whose VALUE is a credential. Matched on the flag, not the value,
-#: because a secret is defined by the slot it sits in, not by how it looks.
-_SECRET_FLAG = re.compile(
-    r"^--?(?:[\w-]*(?:api[_-]?key|apikey|secret|password|passwd|token|bearer|auth"
-    r"|credential|private[_-]?key|access[_-]?key)[\w-]*)$", re.I)
+#: A name whose VALUE is a credential. Matched against the NAME half of both
+#: `--api-key=X` and the dashless `API_KEY=X`, because a secret is defined by the slot
+#: it sits in rather than by how the value looks.
+_SECRET_NAME = re.compile(
+    r"^[\w.-]*(?:api[_-]?key|apikey|secret|password|passwd|token|bearer|auth"
+    r"|credential|private[_-]?key|access[_-]?key|client[_-]?secret|session[_-]?key)"
+    r"[\w.-]*$", re.I)
 
-#: Values recognizable as credentials on their own, regardless of which slot they
-#: occupy. Kept SHORT and shape-based on purpose: this list is a bonus, never the
-#: defence. The flag-name rule above is the defence.
+#: Names that MATCH _SECRET_NAME but do NOT carry a secret. This list is the fix for the
+#: redactor damaging its own record: `--no-auth` contains "auth", so the first cut treated
+#: the following token as a credential and blanked it. The result was a row saying a
+#: credential had been stripped, sitting next to a destroyed flag, describing a server
+#: launched with authentication DISABLED. A wrong record in an evidence file is worse than
+#: an unredacted one, because it is confidently wrong.
+_NOT_A_SECRET_SLOT = re.compile(
+    r"^--?(?:no|not|disable|without|skip|allow|require|use|enable)[_-]"      # --no-auth
+    r"|[_-](?:mode|file|path|dir|type|format|env|name|id|header|method|url|scheme"
+    r"|source|provider|algorithm|alg|required|enabled|disabled)$", re.I)
+
+#: Values recognizable as credentials wherever they sit. Deliberately shape-based and
+#: deliberately a BONUS: the name rules above are the defence. The hyphen forms matter
+#: most in practice — every current LLM vendor issues `sk-...`, and the first cut carried
+#: only Stripe's underscore form, which for a product sold to agent operators meant it
+#: missed the two most likely real secrets on any command line it would ever see.
 _SECRET_VALUE = re.compile(
-    r"^(?:sk_live_|sk_test_|rk_live_|pk_live_|ghp_|gho_|github_pat_|xox[baprs]-"
-    r"|AKIA[0-9A-Z]{16}|Bearer\s|glpat-|-----BEGIN)", re.I)
+    r"^(?:sk-[A-Za-z0-9]{2,}-|sk-[A-Za-z0-9]{16,}"          # sk-proj-, sk-ant-api03-, sk-...
+    r"|sk_live_|sk_test_|rk_live_|whsec_"
+    r"|ghp_|gho_|ghu_|ghs_|github_pat_"
+    r"|xox[baprs]-|glpat-|dop_v1_|shpat_|SG\.[A-Za-z0-9_-]{10,}"
+    r"|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}"
+    r"|eyJ[A-Za-z0-9_-]{10,}\."                              # a JWT
+    r"|-----BEGIN)", re.I)
 
-#: Query-string parameters that carry a credential inside an otherwise ordinary URL.
+#: Header names whose value is a credential, for `--header "Authorization: Bearer X"`.
+_SECRET_HEADER = re.compile(
+    r"^\s*(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token"
+    r"|x-access-token|cookie|set-cookie|x-amz-security-token|private-token)\s*$", re.I)
+
+#: Query-string parameters carrying a credential inside an otherwise useful URL. `key` is
+#: listed explicitly: `?key=` is Google's standard API-key parameter and the first cut's
+#: pattern required the literal `apikey`/`api_key`, so a bare `key=` leaked.
 _SECRET_QS = re.compile(
-    r"([?&](?:[\w-]*(?:api[_-]?key|apikey|secret|token|password|auth|sig|signature)"
-    r"[\w-]*)=)[^&\s]+", re.I)
+    r"([?&](?:key|apikey|api[_-]key|access[_-]?key|secret|client[_-]secret|token"
+    r"|private[_-]token|access[_-]token|id[_-]token|refresh[_-]token|password|passwd"
+    r"|auth|credential|sig|signature|x-goog-api-key)=)[^&\s]+", re.I)
 
 #: user:password@host in a URL.
-_URL_USERINFO = re.compile(r"(://)[^/@\s]+:[^/@\s]+@")
+_URL_USERINFO = re.compile(r"(://)[^/@\s:]+:[^/@\s]+@")
 
 REDACTED = "<redacted>"
+
+
+def _looks_like_secret_slot(name: str) -> bool:
+    """Does a credential belong in the slot called `name`?"""
+    if _NOT_A_SECRET_SLOT.search(name):
+        return False
+    return bool(_SECRET_NAME.match(name.lstrip("-")))
 
 
 def _redact_argv(command):
     """Strip credentials out of a wrapped server's command line.
 
-    Why this is not optional. The adapter is wired in by wrapping somebody else's
-    launch command, and launch commands routinely carry live secrets:
-    `mcp-server --api-key sk_live_... --url https://api.example/?token=...`. That
-    array used to be written verbatim into the `session_begin` row, in the DEFAULT
-    person-free mode, into a file whose entire purpose is to be copied into an
-    evidence bundle and handed to a third-party auditor. Digest-only mode promised
-    no payloads and then leaked the one string most likely to be a live credential.
+    Why this is not optional. This adapter is wired in by wrapping somebody else's launch
+    command, and launch commands routinely carry live secrets. That array is written into
+    the `session_begin` row in the DEFAULT digest-only mode, into a file whose whole
+    purpose is to be copied into an evidence bundle and handed to a third-party auditor.
 
-    Four rules, in order of how much they can be trusted:
-      1. A value sitting in a secret-named slot (`--api-key VALUE`, `--token=VALUE`).
-         This is the reliable rule, because it reads the slot rather than guessing at
-         the value's shape.
-      2. A value whose own shape is a known credential (`sk_live_`, `ghp_`, a PEM
-         header). Useful, and a bonus only.
-      3. A credential inside a URL query string, replaced in place so the rest of
-         the URL survives and stays useful.
-      4. `user:password@host` userinfo in a URL.
+    Detection, in descending order of how much it can be trusted:
 
-    STATED LIMIT, because a redactor that quietly misses a class is worse than none
-    at all: this cannot recognise an unrecognisably-named flag holding a secret
-    (`--k9 hunter2`), and it does not read the environment, which is where a wrapped
-    server's secrets more often live and which this adapter never logs. The honest
-    guidance is unchanged: do not put secrets on a command line. The redaction is a
-    second line, not a licence.
+      1. A value in a credential-NAMED slot, in either form: `--api-key X`,
+         `--token=X`, and — the one that matters most in practice — the DASHLESS
+         `API_KEY=X`, which is how `docker run -e`, `env`, and most MCP client configs
+         actually pass secrets. Names are checked against a negative list first, so a
+         flag that merely CONTAINS a credential word without carrying one (`--no-auth`,
+         `--auth-mode`, `--api-key-file`) is left alone.
+      2. A credential inside an HTTP header argument (`--header "Authorization: ..."`).
+      3. A value whose own shape is a known credential kind. A bonus, never the defence.
+      4. A credential in a URL query string, or userinfo in a URL, replaced in place so
+         the rest of the URL survives and stays useful.
 
-    Returns the cleaned argv and how many substitutions were made, so the row can
-    declare that redaction occurred rather than leaving the reader to guess whether
-    a clean-looking command was clean or scrubbed.
+    TWO WAYS THIS CAN BE WRONG, AND ONLY ONE OF THEM IS SAFE. Failing to redact leaks a
+    key. Redacting the wrong thing writes a FALSE RECORD: the first version of this
+    function saw "auth" inside `--no-auth`, blanked the token after it, and produced a
+    row claiming a credential had been stripped from a server that was in fact launched
+    with authentication turned off. A confidently wrong evidence file is worse than an
+    unredacted one, so the value-consuming path now refuses to eat anything that starts
+    with `-` and refuses slots on the negative list.
+
+    STATED LIMITS, because a redactor that quietly misses a class manufactures confidence.
+    It cannot recognise a credential in an arbitrarily-named slot (`--k9 hunter2`), or a
+    bare high-entropy value in no slot at all with no recognisable prefix. It reads only
+    `argv`; a secret passed through the actual process environment is never seen by this
+    function and is never logged by this adapter either — note that `-e NAME=VALUE` is
+    ARGV, not the environment, and IS covered, which is a correction to what an earlier
+    version of this docstring claimed. The guidance is unchanged and is the real control:
+    **do not put secrets on a command line.** Redaction is a second line, not a licence.
+
+    Returns the cleaned argv and the number of substitutions made, so the row can declare
+    that redaction occurred rather than leaving a reader to guess whether a clean-looking
+    command was clean or scrubbed.
     """
     out = []
     hits = 0
-    expect_secret = False
+    expect_secret_for = None
     for tok in command:
-        if expect_secret:
-            out.append(REDACTED)
-            hits += 1
-            expect_secret = False
-            continue
-        if "=" in tok and tok.startswith("-"):
-            flag, _, _value = tok.partition("=")
-            if _SECRET_FLAG.match(flag):
-                out.append(f"{flag}={REDACTED}")
+        tok = tok if isinstance(tok, str) else str(tok)
+
+        # A pending credential slot from the previous token.
+        if expect_secret_for is not None:
+            # Never consume another flag: `--token --verbose` means the flag took no
+            # value, and blanking `--verbose` would delete configuration and invent a
+            # credential that was never there.
+            if tok.startswith("-"):
+                expect_secret_for = None
+            else:
+                out.append(REDACTED)
+                hits += 1
+                expect_secret_for = None
+                continue
+
+        # NAME=VALUE, with or without leading dashes. Covers `--token=X` and the
+        # dashless `API_KEY=X` that the first version of this function never inspected.
+        if "=" in tok:
+            name, _, value = tok.partition("=")
+            if value and _looks_like_secret_slot(name):
+                out.append("%s=%s" % (name, REDACTED))
                 hits += 1
                 continue
-        if _SECRET_FLAG.match(tok):
+
+        # `Authorization: Bearer x` arriving as one argument.
+        if ":" in tok and not tok.startswith("-"):
+            hname, _, hvalue = tok.partition(":")
+            if hvalue.strip() and _SECRET_HEADER.match(hname):
+                out.append("%s: %s" % (hname, REDACTED))
+                hits += 1
+                continue
+
+        # A bare flag naming a credential: the VALUE is the next token.
+        if tok.startswith("-") and "=" not in tok and _looks_like_secret_slot(tok):
             out.append(tok)
-            expect_secret = True
+            expect_secret_for = tok
             continue
+
         if _SECRET_VALUE.match(tok):
             out.append(REDACTED)
             hits += 1
             continue
-        cleaned = _URL_USERINFO.sub(rf"\1{REDACTED}:{REDACTED}@", tok)
-        cleaned = _SECRET_QS.sub(rf"\1{REDACTED}", cleaned)
+
+        cleaned = _URL_USERINFO.sub(r"\1%s:%s@" % (REDACTED, REDACTED), tok)
+        cleaned = _SECRET_QS.sub(r"\1%s" % REDACTED, cleaned)
         if cleaned != tok:
             hits += 1
         out.append(cleaned)
