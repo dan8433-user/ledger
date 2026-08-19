@@ -184,6 +184,11 @@ class SeamObserver:
         self._seq = 0
         self.rows = 0
         self.calls_seen = 0
+        #: Rows that could not be written even as a skeleton. Reported in
+        #: `session_end` so an absence in this log is always a DECLARED absence:
+        #: an undeclared `seq` gap passes chain verification and therefore reads
+        #: as "nothing happened", which is the one failure this file cannot allow.
+        self.rows_unlogged = 0
         #: Filled from the `initialize` handshake if we see it; a client that
         #: never initializes just leaves these None rather than blocking a row.
         self.client_info: dict | None = None
@@ -194,7 +199,26 @@ class SeamObserver:
     # -- row emission -------------------------------------------------------
 
     def _row(self, evt: str, **fields) -> dict:
-        """Build and append one row. Caller must hold `self._lock`."""
+        """Build and append one row. Caller must hold `self._lock`.
+
+        Three attempts, deliberately in this order, because the thing being protected
+        is the EXISTENCE of the row and not the completeness of its text:
+
+        1. Write it as-is. This is the only path a normal frame ever takes, so the
+           repair machinery below costs nothing when nothing is wrong. Scrubbing every
+           row up front would mean deep-walking every raw payload on every call.
+        2. On failure, escape any text UTF-8 cannot encode and write it again, marked
+           with `record_repair` so the row itself declares that it was altered.
+        3. If even that fails, write a skeleton naming the event and the reason. A row
+           that says "a tool_call happened here and its content could not be stored"
+           is worth incomparably more than a gap, because a gap is indistinguishable
+           from nothing having happened.
+
+        Only if all three fail does the row become a counted absence. `rows_unlogged`
+        is reported in `session_end` for exactly that reason: a hole in this log must
+        always be a declared hole. A silent `seq` gap is the one outcome that is not
+        allowed, because it verifies green.
+        """
         self._seq += 1
         row = {
             "evt": evt,
@@ -205,7 +229,31 @@ class SeamObserver:
             "server": self.server,
         }
         row.update({k: v for k, v in fields.items() if v is not None})
-        self._emit(row)
+        try:
+            self._emit(row)
+        except Exception as first:
+            repaired = _escape_unencodable(row)
+            repaired["record_repair"] = f"unencodable_text_escaped:{type(first).__name__}"
+            try:
+                self._emit(repaired)
+                row = repaired
+            except Exception as second:
+                skeleton = {
+                    "evt": evt,
+                    "seam": SEAM,
+                    "seam_impl": self.impl,
+                    "session": self.session,
+                    "seq": self._seq,
+                    "server": self.server,
+                    "record_error": f"{type(first).__name__}/{type(second).__name__}",
+                    "record_error_note": "event occurred; its content could not be stored",
+                }
+                try:
+                    self._emit(skeleton)
+                    row = skeleton
+                except Exception:
+                    self.rows_unlogged += 1
+                    return row
         self.rows += 1
         return row
 
@@ -226,6 +274,7 @@ class SeamObserver:
         with self._lock:
             return self._row("session_end", reason=reason, exit_code=exit_code,
                              rows_before_end=self.rows, calls=self.calls_seen,
+                             rows_unlogged=self.rows_unlogged or None,
                              **fields)
 
     # -- observation --------------------------------------------------------
@@ -376,6 +425,36 @@ def _safe_digest(value: Any) -> str | None:
         return digest_json(value)
     except Exception as e:
         return f"undigestible:{type(e).__name__}"
+
+
+def _escape_unencodable(value):
+    """Rewrite any text that UTF-8 cannot encode into an escaped, encodable form.
+
+    Why this exists: JSON permits `\\udXXX` escapes, so a frame can legally carry a
+    LONE SURROGATE. `json.loads` hands it back as a real `str`, and `.encode("utf-8")`
+    then refuses it — which means one such character anywhere in a tool name (or, in
+    raw mode, anywhere in a tool's arguments or its response body) used to make the
+    whole row un-writable. The append raised, `proxy.relay` swallowed it to protect
+    transport, and the call vanished from the record while the chain still verified
+    green. A malicious tool could erase its own call by returning one character.
+
+    That is the same hole `flush_pending` closes from the other side, and it gets the
+    same answer: the FACT of the call is not negotiable, the fidelity of its text is.
+    `backslashreplace` keeps the offending code point visible as literal `\\udXXX`
+    text instead of discarding it, so an auditor sees what was there and that it was
+    repaired, rather than seeing nothing at all.
+    """
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return value.encode("utf-8", "backslashreplace").decode("ascii")
+        return value
+    if isinstance(value, dict):
+        return {_escape_unencodable(k): _escape_unencodable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_escape_unencodable(v) for v in value]
+    return value
 
 
 def _status_of(msg: dict) -> str:

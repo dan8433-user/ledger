@@ -82,6 +82,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -266,10 +267,17 @@ def run(command: list[str], ledger_path: str, *, server: str | None = None,
             f"DELIBERATELY CORRUPTING relayed bytes. Test harness only.\n")
         sys.stderr.flush()
 
+    # The command line is redacted BEFORE it reaches the row. `command_digest` is
+    # taken over the ORIGINAL argv, so the record still pins exactly what was run
+    # for anyone who can supply the command and wants to check it, while the file
+    # itself carries no credential. Digesting the redacted form instead would have
+    # been the quieter bug: the row would verify against nothing real.
+    safe_command, redactions = _redact_argv(list(command))
     obs.session_begin(
         adapter_version=VERSION,
         ledger_backend=backend(),
-        command=list(command),
+        command=safe_command,
+        command_redactions=redactions or None,
         command_digest=_digest(command),
         cwd=os.getcwd(),
         pid=os.getpid(),
@@ -346,6 +354,93 @@ def run(command: list[str], ledger_path: str, *, server: str | None = None,
 def _digest(value) -> str:
     from ._ledger import digest_json
     return digest_json(value)
+
+
+#: Argv flag names whose VALUE is a credential. Matched on the flag, not the value,
+#: because a secret is defined by the slot it sits in, not by how it looks.
+_SECRET_FLAG = re.compile(
+    r"^--?(?:[\w-]*(?:api[_-]?key|apikey|secret|password|passwd|token|bearer|auth"
+    r"|credential|private[_-]?key|access[_-]?key)[\w-]*)$", re.I)
+
+#: Values recognizable as credentials on their own, regardless of which slot they
+#: occupy. Kept SHORT and shape-based on purpose: this list is a bonus, never the
+#: defence. The flag-name rule above is the defence.
+_SECRET_VALUE = re.compile(
+    r"^(?:sk_live_|sk_test_|rk_live_|pk_live_|ghp_|gho_|github_pat_|xox[baprs]-"
+    r"|AKIA[0-9A-Z]{16}|Bearer\s|glpat-|-----BEGIN)", re.I)
+
+#: Query-string parameters that carry a credential inside an otherwise ordinary URL.
+_SECRET_QS = re.compile(
+    r"([?&](?:[\w-]*(?:api[_-]?key|apikey|secret|token|password|auth|sig|signature)"
+    r"[\w-]*)=)[^&\s]+", re.I)
+
+#: user:password@host in a URL.
+_URL_USERINFO = re.compile(r"(://)[^/@\s]+:[^/@\s]+@")
+
+REDACTED = "<redacted>"
+
+
+def _redact_argv(command):
+    """Strip credentials out of a wrapped server's command line.
+
+    Why this is not optional. The adapter is wired in by wrapping somebody else's
+    launch command, and launch commands routinely carry live secrets:
+    `mcp-server --api-key sk_live_... --url https://api.example/?token=...`. That
+    array used to be written verbatim into the `session_begin` row, in the DEFAULT
+    person-free mode, into a file whose entire purpose is to be copied into an
+    evidence bundle and handed to a third-party auditor. Digest-only mode promised
+    no payloads and then leaked the one string most likely to be a live credential.
+
+    Four rules, in order of how much they can be trusted:
+      1. A value sitting in a secret-named slot (`--api-key VALUE`, `--token=VALUE`).
+         This is the reliable rule, because it reads the slot rather than guessing at
+         the value's shape.
+      2. A value whose own shape is a known credential (`sk_live_`, `ghp_`, a PEM
+         header). Useful, and a bonus only.
+      3. A credential inside a URL query string, replaced in place so the rest of
+         the URL survives and stays useful.
+      4. `user:password@host` userinfo in a URL.
+
+    STATED LIMIT, because a redactor that quietly misses a class is worse than none
+    at all: this cannot recognise an unrecognisably-named flag holding a secret
+    (`--k9 hunter2`), and it does not read the environment, which is where a wrapped
+    server's secrets more often live and which this adapter never logs. The honest
+    guidance is unchanged: do not put secrets on a command line. The redaction is a
+    second line, not a licence.
+
+    Returns the cleaned argv and how many substitutions were made, so the row can
+    declare that redaction occurred rather than leaving the reader to guess whether
+    a clean-looking command was clean or scrubbed.
+    """
+    out = []
+    hits = 0
+    expect_secret = False
+    for tok in command:
+        if expect_secret:
+            out.append(REDACTED)
+            hits += 1
+            expect_secret = False
+            continue
+        if "=" in tok and tok.startswith("-"):
+            flag, _, _value = tok.partition("=")
+            if _SECRET_FLAG.match(flag):
+                out.append(f"{flag}={REDACTED}")
+                hits += 1
+                continue
+        if _SECRET_FLAG.match(tok):
+            out.append(tok)
+            expect_secret = True
+            continue
+        if _SECRET_VALUE.match(tok):
+            out.append(REDACTED)
+            hits += 1
+            continue
+        cleaned = _URL_USERINFO.sub(rf"\1{REDACTED}:{REDACTED}@", tok)
+        cleaned = _SECRET_QS.sub(rf"\1{REDACTED}", cleaned)
+        if cleaned != tok:
+            hits += 1
+        out.append(cleaned)
+    return out, hits
 
 
 def _binary_stdin():
