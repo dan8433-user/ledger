@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.1.1 — 2026-08-19 — SECURITY. Upgrade from 0.1.0.
+
+Two defects found by adversarial review, both breaking the one property this package
+exists to provide: that everything crossing the instrumented seam is in the record.
+
+**A tool call could be missing from the seam log while the chain still verified green.**
+Certain content in a tool name — or, with `--raw`, in a tool's own response body — made
+the row write fail. The proxy swallows observer errors by design, so that a logging
+problem can never break a customer's transport, which meant the call executed, the
+response was forwarded, and no row existed. Verification passed, because it checks that
+the chain links hold and nothing checked whether a row was *absent*. The only residual
+trace was a gap in the sequence numbers and a `session_end` whose call count disagreed
+with the number of rows, and nothing in the package compared those two figures.
+
+The consequence worth stating plainly, because it is the reason this is a security
+release rather than a bug fix: **the party being audited could influence whether its own
+call appeared in the record.** That is precisely what an out-of-process observer is for.
+
+Fixed by making the FACT of a call non-negotiable while the fidelity of its text is not.
+A row that cannot be written as-is is rewritten in a form that can be, and marked
+`record_repair` so it declares its own alteration rather than passing as pristine. If
+even that fails, a skeleton row records that an event occurred and that its content
+could not be stored, because a row saying "something happened here and I could not keep
+it" is worth incomparably more than a gap — a gap is indistinguishable from nothing
+having happened. Only if all of that fails does it become a counted absence, reported as
+`rows_unlogged` in `session_end`. **A hole in this log is now always a declared hole.**
+
+**The wrapped server's command line was written verbatim into the `session_begin` row.**
+This package is wired in by wrapping another server's launch command, and launch commands
+routinely carry live credentials. That array was logged unconditionally, including in the
+default digest-only mode that the documentation describes as person-free, into a file
+whose stated purpose is to be copied into an evidence bundle and handed to a third-party
+auditor. So the mode advertised as containing no sensitive payload was recording the one
+string on the machine most likely to be a live key.
+
+Command lines are now redacted before the row is built, with a `command_redactions` count
+on the row so a clean command is distinguishable from a scrubbed one. `command_digest` is
+still computed over the ORIGINAL argv, so the record continues to pin exactly what ran
+for anyone who can supply the command and wants to check it; digesting the redacted form
+would have been the quieter bug, pinning something that never executed.
+
+**The redactor's limits, stated here rather than implied away.** It recognises a value
+sitting in a credential-named flag, a value whose own shape is a known credential kind, a
+credential inside a URL query string, and URL userinfo. It cannot recognise an
+arbitrarily-named flag holding a secret, and it does not read the environment, which is
+where a wrapped server's secrets more often live and which this package never logs. A
+redactor that quietly misses a class is more dangerous than none, because it manufactures
+confidence — so the guidance is unchanged: **do not put secrets on a command line.** The
+redaction is a second line, not a licence.
+
+**Tests.** Eleven new tests covering both defects, each one confirmed to FAIL against
+0.1.0 before the fix landed. A regression test whose red has never been observed is
+decoration, and two separate checks in this project were found this week to be exactly
+that. Full suite: 76 passing.
+
+One of those tests caught its own first draft, which is worth recording. The hostile
+input was initially written in a way that made it ordinary ASCII rather than the
+problematic value, so the attack was never delivered, the row appeared normally, and the
+row-count assertion passed while testing nothing. Only a second assertion — that a
+repaired row must declare its own repair — exposed it. The constant now carries a comment
+explaining precisely why it is written the way it is.
+
+**Reproductions are not published here.** Installs still on 0.1.0 are unpatched, and a
+step-by-step method for removing a row from an audit log is useful to the wrong reader.
+Ask if you have a concrete need for the detail.
+
+Requires `arcaeon-ledger>=0.5.8` for the `[ledger]` extra: the library shipped matching
+fixes in the same batch, including one where a log receiving writes that went nowhere
+still reported as fully verified.
+
 ## 0.1.0 — 2026-08-19
 
 First version. An MCP stdio proxy that records every tool call to a tamper-evident

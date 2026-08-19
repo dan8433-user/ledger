@@ -88,7 +88,7 @@ Stated as limits rather than as attack paths. These are properties the library d
 
 **Verified after publishing, with the exact command that had failed:** `pip install arcaeon-adapter[ledger]` now resolves to adapter 0.1.0 + ledger 0.5.7 (needed `--no-cache-dir`; pip had cached the pre-publish index while PyPI's simple index already carried both artefacts). The Dockerfile ENTRYPOINT was also exercised directly against the published 0.5.7: `initialize` returns `serverInfo.version 0.5.7` and `tools/list` returns both tools. Docker itself is still unavailable here (`docker`, `go` and `task` all absent, and the WSL image has none either), so the container layer remains untested and the Dockerfile says so.
 
-Full scar write-up: `memory/SCAR_TISSUE.md` #91.
+Written up internally in full. That path is in a private repo, so it is named here only to record that the write-up exists rather than to send you somewhere you cannot go; ask if the detail would be useful.
 
 ## 2026-08-19 — `arcaeon-adapter` moves into this repo, and completeness is named as the fifth gap
 

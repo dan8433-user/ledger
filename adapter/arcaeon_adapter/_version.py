@@ -7,5 +7,5 @@ stderr). Two hardcoded copies would drift, and the version is stamped into every
 row as `seam_impl` — a row that lies about which build wrote it is a small
 corruption of exactly the thing this package sells.
 """
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 IMPL = f"arcaeon-adapter/{VERSION}"

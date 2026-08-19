@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arcaeon-adapter"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP stdio proxy that records every tool call to a tamper-evident ledger, without the agent's cooperation."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -28,8 +28,8 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-ledger = ["arcaeon-ledger>=0.5.7"]
-dev = ["pytest", "arcaeon-ledger>=0.5.7"]
+ledger = ["arcaeon-ledger>=0.5.8"]
+dev = ["pytest", "arcaeon-ledger>=0.5.8"]
 
 [project.scripts]
 arcaeon-adapter = "arcaeon_adapter.proxy:main"

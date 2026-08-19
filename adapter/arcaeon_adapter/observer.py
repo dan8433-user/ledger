@@ -171,7 +171,7 @@ class SeamObserver:
 
     def __init__(self, emit: Callable[[dict], Any], *, server: str,
                  session: str | None = None, raw: bool = False,
-                 impl: str = "arcaeon-adapter/0.1.0",
+                 impl: str = "arcaeon-adapter/0.1.1",
                  clock: Callable[[], float] = time.monotonic):
         self._emit = emit
         self.server = server
