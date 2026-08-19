@@ -1,3 +1,5 @@
+# Changelog
+
 ## 0.5.7 — PUBLISHED to PyPI 2026-08-19 (the version existed for a day before it shipped)
 
 **The defect this closes.** 0.5.7 was written, tested (99 passing), documented in this file, committed and pushed — and never published. Pushing the source read as shipping it. That single gap produced two downstream failures in files that never mention each other:
@@ -10,8 +12,6 @@
 **Verified after publishing, with the exact command that had failed:** `pip install arcaeon-adapter[ledger]` now resolves to adapter 0.1.0 + ledger 0.5.7 (needed `--no-cache-dir`; pip had cached the pre-publish index while PyPI's simple index already carried both artefacts). The Dockerfile ENTRYPOINT was also exercised directly against the published 0.5.7: `initialize` returns `serverInfo.version 0.5.7` and `tools/list` returns both tools. Docker itself is still unavailable here (`docker`, `go` and `task` all absent, and the WSL image has none either), so the container layer remains untested and the Dockerfile says so.
 
 Full scar write-up: `memory/SCAR_TISSUE.md` #91.
-
-# Changelog
 
 ## 2026-08-19 — `arcaeon-adapter` moves into this repo, and completeness is named as the fifth gap
 
