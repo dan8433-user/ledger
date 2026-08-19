@@ -1,3 +1,16 @@
+## 0.5.7 — PUBLISHED to PyPI 2026-08-19 (the version existed for a day before it shipped)
+
+**The defect this closes.** 0.5.7 was written, tested (99 passing), documented in this file, committed and pushed — and never published. Pushing the source read as shipping it. That single gap produced two downstream failures in files that never mention each other:
+
+1. **`pip install arcaeon-adapter[ledger]` failed hard.** The adapter, published the same morning, declares `arcaeon-ledger>=0.5.7`; PyPI's newest was 0.5.6, so the extra could not resolve: *"No matching distribution found for arcaeon-ledger>=0.5.7."* The bare `pip install arcaeon-adapter` worked, which is the command that got verified and reported. Verifying the path you documented is not verifying the paths you published.
+2. **`Dockerfile` pinned `==0.5.6`,** so the image shipped a version behind the repo it claims to package. Fixed by publishing 0.5.7, not by editing the number.
+
+**Packaging fix found while checking the artefacts.** The sdist was sweeping in all 15 files of `adapter/`, including its own `pyproject.toml` — a nested project file inside a source distribution confuses build frontends and makes the tarball claim to contain a package it does not install. The wheel was always clean; only the sdist was wrong, which is exactly the kind of thing that survives when you check one artefact and assume the other. Added `[tool.hatch.build.targets.sdist] exclude`, which also dropped the `.hypothesis` test cache. **Sdist went from 318 entries to 26** — now just source, tests, README, CHANGELOG, LICENSE, Dockerfile and server.json.
+
+**Verified after publishing, with the exact command that had failed:** `pip install arcaeon-adapter[ledger]` now resolves to adapter 0.1.0 + ledger 0.5.7 (needed `--no-cache-dir`; pip had cached the pre-publish index while PyPI's simple index already carried both artefacts). The Dockerfile ENTRYPOINT was also exercised directly against the published 0.5.7: `initialize` returns `serverInfo.version 0.5.7` and `tools/list` returns both tools. Docker itself is still unavailable here (`docker`, `go` and `task` all absent, and the WSL image has none either), so the container layer remains untested and the Dockerfile says so.
+
+Full scar write-up: `memory/SCAR_TISSUE.md` #91.
+
 # Changelog
 
 ## 2026-08-19 — `arcaeon-adapter` moves into this repo, and completeness is named as the fifth gap

@@ -34,3 +34,12 @@ Issues = "https://github.com/dan8433-user/ledger/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["arcaeon_ledger"]
+
+# adapter/ is a SEPARATE package (arcaeon-adapter) that shares this repo on
+# purpose. The wheel never picked it up, but the sdist swept in all 15 of its
+# files including its own pyproject.toml — a nested project file inside a
+# source distribution confuses build frontends and makes the tarball claim to
+# contain something it does not install. Found 2026-08-19 by listing the built
+# artefacts instead of trusting that the wheel config covered both targets.
+[tool.hatch.build.targets.sdist]
+exclude = ["adapter", "dist", "mcp-publisher.exe", ".hypothesis", "__pycache__"]
