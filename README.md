@@ -116,12 +116,12 @@ appearing *after* the chain begins is itself flagged. On a mismatch, verify
 keeps going from the claimed value so it counts later damage honestly instead of
 cascading one break into noise.
 
-## What it proves — and the four things it doesn't
+## What it proves — and the five things it doesn't
 
 Being precise here is the product, not a disclaimer. A hash chain proves the
 recorded bytes were not altered *in place* after writing: mid-file edit, delete,
 and reorder all break it and `verify` names the row. It does **not** by itself
-prove four other things:
+prove five other things:
 
 **1. Truncation.** Lop off the most recent rows and what remains verifies clean —
 no append-only chain catches this alone. Close it by publishing the head somewhere
@@ -158,9 +158,32 @@ log is chained from genesis and must have no legitimate legacy rows, pass
 red. (An unchained row inserted *after* the chain begins is already flagged in
 every mode.)
 
+**5. Completeness.** This is the big one, and it is structural: the agent decides
+what to call `append` on. A tamper-evident log of the calls an agent *chose to
+report* is still self-report. Nothing inside this library can close that, because
+anything the agent invokes, the agent can decline to invoke.
+
+Close it by moving the pen out of the agent's reach — record at the seam instead,
+in a separate OS process the agent does not own, cannot skip, and cannot see:
+
+```
+pip install arcaeon-adapter
+
+python -m arcaeon_adapter --ledger seam.log.jsonl -- <your mcp server command...>
+```
+
+[`arcaeon-adapter`](https://github.com/dan8433-user/ledger/tree/main/adapter) is a
+stdio proxy that forwards JSON-RPC byte-for-byte between an MCP client and server,
+writing one hash-chained row per `tools/call` to its own ledger. Wrapping it around
+*this* library's own MCP server produced the number that makes the point: the
+server's own diary wrote **0 rows** while the seam log captured **5**. The gap
+between what a system reports about itself and what the seam observed is the
+thing worth measuring.
+
 Scoped honestly, the primitive is *"this file was not rewritten in place"* — small,
 true, and testable. The layers above (external anchoring via `head()`, artefact
-binding, signed authorship) are how you extend it toward a full evidence claim.
+binding, signed authorship, seam recording) are how you extend it toward a full
+evidence claim.
 
 ### verify() on missing or empty ledgers
 

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "arcaeon-adapter"
+version = "0.1.0"
+description = "MCP stdio proxy that records every tool call to a tamper-evident ledger, without the agent's cooperation."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Arcaeon" }]
+keywords = ["ai", "agents", "mcp", "audit", "proxy", "tamper-evident", "provenance", "compliance"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Intended Audience :: Developers",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: System :: Logging",
+]
+
+# arcaeon-ledger is the intended writer and is what makes a row provable. It is
+# NOT a hard requirement on purpose: this package gets wrapped around somebody
+# else's MCP server by editing one line of config, and a missing dependency must
+# never be the reason their working server fails to start. Without it, rows are
+# written by a byte-compatible fallback (see arcaeon_adapter/_ledger.py) and
+# `session_begin` says so in `ledger_backend`.
+dependencies = []
+
+[project.optional-dependencies]
+ledger = ["arcaeon-ledger>=0.5.7"]
+dev = ["pytest", "arcaeon-ledger>=0.5.7"]
+
+[project.scripts]
+arcaeon-adapter = "arcaeon_adapter.proxy:main"
+arcaeon-adapter-selftest = "arcaeon_adapter.selftest:main"
+
+[project.urls]
+Homepage = "https://arcaeon.io"
+Changelog = "https://github.com/dan8433-user/ledger/blob/main/adapter/CHANGELOG.md"
+Source = "https://github.com/dan8433-user/ledger/tree/main/adapter"
+Issues = "https://github.com/dan8433-user/ledger/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["arcaeon_adapter"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
