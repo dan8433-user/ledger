@@ -77,8 +77,8 @@ try:                      # Windows byte-range locks
 except ImportError:       # pragma: no cover - platform dependent
     _msvcrt = None
 
-__version__ = "0.5.7"
-__all__ = ["Ledger", "VerifyResult", "verify_file", "chain_at", "authority", "Head",
+__version__ = "0.5.8"
+__all__ = ["LedgerWriteError", "Ledger", "VerifyResult", "verify_file", "chain_at", "authority", "Head",
            "bind_artefact", "verify_artefact", "digest_bytes", "digest_json",
            "WitnessStore", "publish_head", "verify_against_witness", "WitnessVerdict"]
 
@@ -115,13 +115,41 @@ def _line_start_before(fh, end: int) -> int:
 
 
 def _chain(prev: str, obj: dict) -> str:
-    """chain = sha256(prev_chain + canonical-json-of-row-without-chain)."""
+    """chain = sha256(prev_chain + json.dumps(row_without_chain, sort_keys=True)).
+
+    Note the separators: this is Python's DEFAULT `", "` / `": "` spacing, NOT the
+    compact `json-c14n:v1` form used by `digest_json`. The chain body is its own
+    unversioned rule and always has been. Written out here because the README
+    described it as "canonical_json", and anyone building a cross-language verifier
+    from that word got a mismatch on every honest row.
+    """
     body = json.dumps({k: v for k, v in obj.items() if k != "chain"},
                       ensure_ascii=False, sort_keys=True)
     # str(prev) is a no-op on every honest path (prev is always a hex string
     # produced here or 'genesis'); it is a defense-in-depth floor so no route to
     # a non-string prev can ever crash the hash with `int + str` (0.5.5).
-    return hashlib.sha256((str(prev) + body).encode("utf-8")).hexdigest()[:_CHAIN_LEN]
+    #
+    # errors="surrogatepass" (0.5.8) so a LONE SURROGATE cannot turn the verifier
+    # into a crash. JSON permits `\udXXX` escapes and `json.dumps` emits them by
+    # default, so any cross-language writer or log-shipper can put an unpaired
+    # surrogate in a row that is perfectly valid JSON. Plain UTF-8 refuses to
+    # encode it, which raised UnicodeEncodeError out of here and left the file
+    # append-able and iterable while `verify`, `head` and `bundle` were all
+    # PERMANENTLY DEAD on it. That is the exact failure this module refuses twice
+    # elsewhere: "one smuggled line turned the verifier into a crash instead of a
+    # verdict." surrogatepass is deterministic and byte-identical for every input
+    # that could already be encoded, so no honest historical digest moves.
+    return hashlib.sha256(
+        (str(prev) + body).encode("utf-8", "surrogatepass")).hexdigest()[:_CHAIN_LEN]
+
+
+class LedgerWriteError(OSError):
+    """A row was not stored, and `append()` refuses to report success for it.
+
+    Distinct from the OSErrors the filesystem raises on its own: this one means the
+    write reported success and the bytes are not there. It subclasses OSError so
+    existing `except OSError` handlers around append keep working.
+    """
 
 
 _APPEND_LOCK_TIMEOUT = 15.0   # seconds to wait for a contended append lock
@@ -330,13 +358,58 @@ class Ledger:
                             sep = b"\n"
             except OSError:
                 pass
+            # STRICT utf-8 on the WRITE, deliberately asymmetric with `_chain`'s
+            # surrogatepass. The two sides answer different questions.
+            #
+            # Write side: a row carrying a lone surrogate must be REFUSED, loudly,
+            # before any bytes are written. This raises UnicodeEncodeError here, the
+            # file is never opened, and nothing is recorded — which is correct, and
+            # is what the library already did. Writing it with surrogatepass instead
+            # would emit WTF-8 bytes that the reader (utf-8 + errors="replace")
+            # decodes back as U+FFFD, so the row would land and then verify RED
+            # forever. A refused write is honest; an accepted write that can never
+            # verify is a slow-motion false alarm.
+            #
+            # Read side: `_chain` must still be able to hash a surrogate-bearing row,
+            # because such a row can arrive from a FOREIGN writer: json.dumps with
+            # its default ensure_ascii=True emits the six-character escape as pure
+            # ASCII, as does JS JSON.stringify. We do not control who appends to a
+            # JSONL file. The verifier's job is to return a verdict about that row,
+            # not to die on it.
+            payload = sep + line.encode("utf-8")
             with self.path.open("ab") as fh:
-                fh.write(sep + line.encode("utf-8"))
+                fh.write(payload)
                 fh.flush()
                 try:
                     os.fsync(fh.fileno())
                 except OSError:
                     pass  # network mounts may not support fsync; flush is the floor
+                # CONFIRM THE ROW LANDED (0.5.8). Until now `append()` returned a
+                # valid chain hash without ever checking that anything was stored,
+                # and there is a path where nothing is: on Windows a final path
+                # component that is exactly a reserved DEVICE name (`nul`, `NUL`,
+                # `nul.`, `con`, ...) opens successfully, accepts every write, and
+                # keeps the file at zero bytes. Such a name arrives ordinarily, from
+                # a config value or an agent id used to build an extension-less log
+                # path. Every append then succeeded, the file stayed empty, and
+                # `verify` reported intact — a write black hole that no check saw.
+                #
+                # `tell()` after a successful append is the cheapest true statement
+                # about whether bytes exist. It costs one syscall per row and it is
+                # the difference between "the writer believes it wrote" and "the
+                # file contains it". A logger that cannot tell those apart is not an
+                # audit logger.
+                try:
+                    landed = fh.tell()
+                except OSError as e:
+                    raise LedgerWriteError(
+                        f"cannot confirm the row landed in {self.path}: {e}") from e
+            if landed < len(payload):
+                raise LedgerWriteError(
+                    f"wrote {len(payload)} bytes to {self.path} but the file holds "
+                    f"{landed} — the write was discarded. On Windows this is what a "
+                    f"reserved device name (nul, con, aux, prn, com1-9, lpt1-9) does: "
+                    f"it accepts writes and stores nothing. Nothing was recorded.")
         return obj["chain"]
 
     def _last_chain(self) -> str:
@@ -554,7 +627,20 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
             prev = ""
             res.chained += 1
             continue
-        want = _chain(prev, obj)
+        try:
+            want = _chain(prev, obj)
+        except (UnicodeEncodeError, ValueError, TypeError, RecursionError) as e:
+            # Belt to `_chain`'s surrogatepass braces. Anything that makes a row
+            # un-hashable is a break with a line number, never an exception out of
+            # the verifier: the whole contract of this function is that it returns a
+            # verdict about every file, including a hostile one. Continue from a
+            # deterministic value so one poisoned row cannot hide the rest.
+            res.ok = False
+            res.breaks += 1
+            res.first_break = res.first_break or f"line {i}: unhashable row ({type(e).__name__})"
+            prev = claimed
+            res.chained += 1
+            continue
         if claimed != want:
             res.ok = False
             res.breaks += 1
@@ -571,6 +657,26 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
         res.verified_scope = "bounded_prechain_skipped"
         if res.ok:
             res.ok = None
+    elif res.rows == 0 and res.ok:
+        # A FILE WITH NO ROWS IS NOT A VERIFIED FILE (0.5.8). This used to return
+        # ok=True with verified_scope="full", which reads as "every row was checked
+        # and the chain holds" about a file containing nothing. Three things
+        # downstream believed it: `bool(verify(...))`, `head()`/`publish_head`, and
+        # `build_bundle`, whose auditor README printed "VERDICT: intact. Every row
+        # was checked in strict mode and the hash chain holds end to end." over
+        # zero bytes, with the sha256 of the empty string beside it.
+        #
+        # The README already warned that automation branching on `.ok` "needs to
+        # check first_break". Our own bundle generator was that automation and did
+        # not. When the warning has to be obeyed by the library itself and isn't,
+        # the verdict is wrong, not the reader.
+        #
+        # ok=None reuses the shape this module invented in 0.5.7 for exactly this
+        # problem: falsy, so `if verify(...)` stops passing, while still not being a
+        # red — an empty log is not evidence of tampering, it is an absence of
+        # evidence, and those must not print the same.
+        res.ok = None
+        res.verified_scope = "empty"
     return res
 
 
