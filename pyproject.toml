@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arcaeon-ledger"
-version = "0.5.8"
+version = "0.5.9"
 description = "Tamper-evident, hash-chained action log for AI agents. Prove what your agent did."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.5.9 — the witness store now has a chain of its own
+
+0.5.8 retracted a false claim: the witness store said it was "tamper-evident by
+inspection" because it is written append-only, which described how the class writes,
+not a property of the file. An edited pin was undetectable. The retraction shipped
+before the mechanism did; this is the mechanism.
+
+**Each pin now carries two digests.** `prev` links it to the pin before it, which
+catches deletion and reordering. `self` commits it to its own content, which catches
+an edit to the LAST pin — the one a verifier actually reads, and the one a pure
+back-chain structurally cannot protect because nothing links forward from it. New
+`WitnessStore.verify()` recomputes both and names the first break by line.
+
+**That second digest is here because the first draft shipped without it and a
+demonstrated-red run caught the gap.** The reviewer's original attack was editing a
+single pin; in a one-pin store that pin is the tail, and a back-chain-only version
+reported it clean. The test that runs that exact attack is in the suite.
+
+**Legacy files keep working.** Pins written before 0.5.9 have no `prev`; `verify()`
+reports them as `unchained` and does not call them broken, because a witness that
+rejects its own history the moment it upgrades turns every real pin into a false
+alarm. A file with unchained pins and no breaks returns `ok=None` — falsy, scoped,
+and honest about what was checked. Same three-valued shape the ledger uses.
+
+**`verify()` returns a verdict whose truthiness follows the verdict.** Writing the
+test exposed that it first returned a plain dict, and a non-empty dict is always
+truthy, so `if store.verify():` passed over a broken chain — the same container-says-
+yes-while-verdict-says-no defect 0.5.8 fixed in `verify_file`. Now `ok is True` is the
+only truthy state.
+
+**What this still does not do**, because it is the part that gets overclaimed: it makes
+an edit to a stored pin detectable. It does not stop someone with write access from
+discarding the file and minting a fresh consistent one, exactly as the ledger's chain
+cannot stop a consistent full rewrite. The protection remains substantially the
+independence of the host. And `verify_against_witness` still answers only whether the
+log agrees with the pin; making it also consult `store.verify()` is a separate change
+and is not in this release. Do not read "the witness has a chain" as "the witness gap
+is closed."
+
+Full suite green including 20 new witness-chain tests; `selftest` and
+`mutation_harness` unchanged and passing.
+
 ## 0.5.8 — four false greens, and a test file that could not detect the drift it was named for
 
 **Upgrade if you are on 0.5.7 or earlier, and upgrade `arcaeon-adapter` alongside it.** Two of the defects below could leave a record silently incomplete while every integrity check still reported green, which is the one failure mode this library exists to prevent.

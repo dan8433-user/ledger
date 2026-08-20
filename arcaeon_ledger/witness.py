@@ -31,7 +31,9 @@ what `bind_artefact` is for. Stdlib only.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,26 +66,64 @@ class WitnessVerdict:
         return self.verdict == "consistent"
 
 
+#: Chain seed for the pin file. Distinct from the ledger's so a pin digest can
+#: never be confused with a log row digest.
+_WITNESS_GENESIS = "witness-genesis"
+
+
+class WitnessVerify(dict):
+    """The pin-chain verdict. A dict, so `v["ok"]` reads naturally, but with truthiness
+    bound to the verdict rather than to whether the dict has contents.
+
+    Why this is not a plain dict: a non-empty dict is unconditionally truthy, so
+    `if store.verify(): trust_the_pins()` returned True over a BROKEN chain. That is the
+    same shape as a verifier reporting ok=True over an empty file — the container said
+    yes while the verdict inside it said no. Caught by writing the test that asserts
+    ok=None is falsy, which a bare dict could never satisfy.
+
+    Truthy ONLY when ok is exactly True. ok=None (legacy pins skipped, or an empty
+    store) is falsy on purpose: it is a bounded answer, not a green.
+    """
+
+    def __bool__(self) -> bool:
+        return self.get("ok") is True
+
+
 class WitnessStore:
     """Reference witness: an append-only, file-backed store of head pins.
 
     Holds only fingerprints, never log content. One JSONL file; each line is a
     recorded pin `{namespace, rows, chain, as_of, received_at}`.
 
-    WHAT THIS STORE DOES NOT DO, corrected in 0.5.8. It previously said the record
-    was "tamper-evident by inspection" because it is written append-only. That was
-    wrong, and wrong in the direction this library exists to refuse. `record()` writes
-    a plain JSON line with NO chain, NO digest and NO signature, and `latest()` simply
-    takes the last matching line. Append-only describes how this class writes; it is
-    not a property of the file, and nothing here detects a pin that was edited
-    afterwards. A witness file an attacker can write to is not evidence.
+    THE PIN FILE IS ITSELF CHAINED (0.5.9). Each record carries `prev`, the digest of
+    the record before it, AND `self`, the digest of its own content. Both are needed:
+    `prev` catches deletion and reordering, and `self` catches an edit to the LAST pin,
+    which a back-link structurally cannot see because nothing links forward from it. The
+    first draft of this feature had only `prev`, and a demonstrated-red run showed it
+    missing the reviewer's actual attack — editing the only pin in the file. `verify()`
+    names the offending line. This closes a gap that was real and was documented
+    wrongly: through 0.5.8 the docstring claimed the record was "tamper-evident by
+    inspection" because it is written append-only. Append-only describes how this class
+    WRITES. It was never a property of the file, and nothing here detected a pin edited
+    afterwards. That claim was retracted before the mechanism existed; the mechanism now
+    exists.
 
-    The protection is therefore ENTIRELY the independence of the host: a pin is worth
-    exactly as much as the separation between whoever holds it and whoever wrote the
-    log. Put the store somewhere the logging party cannot reach. Two further limits
-    worth knowing before you rely on one: a pin constrains nothing about rows appended
-    after it was taken, and a pin recorded over an empty log constrains nothing at
-    all.
+    LEGACY FILES KEEP WORKING, deliberately. Pins written before 0.5.9 have no `prev`.
+    `verify()` reports those as `unchained` and does NOT call them broken, because a
+    witness that rejects its own history the moment it upgrades turns every real pin
+    into a false alarm, which is worse than having no chain at all. A file with
+    unchained rows and no breaks returns `ok=None`, not `ok=True` — falsy, scoped, and
+    honest about what was actually checked.
+
+    WHAT THE CHAIN STILL DOES NOT DO, because this is the part that gets overclaimed.
+    It makes an edit to a stored pin DETECTABLE. It does not stop anyone with write
+    access from discarding the file and minting a fresh consistent one, exactly as the
+    ledger's own chain cannot stop a consistent full rewrite. So the protection is
+    still substantially the independence of the host: a pin is worth the separation
+    between whoever holds it and whoever wrote the log. Put the store somewhere the
+    logging party cannot reach. Two further limits worth knowing: a pin constrains
+    nothing about rows appended after it was taken, and a pin recorded over an empty
+    log constrains nothing at all.
 
     A hosted witness (Stage 0) is an HTTP endpoint wrapping this: POST a pin ->
     `record`, GET the latest -> `latest`. Running it in-process, as the tests and
@@ -94,7 +134,12 @@ class WitnessStore:
         self.path = Path(path)
 
     def record(self, namespace: str, head: Head, *, received_at: str | None = None) -> dict:
-        """Append a pin for `namespace`. Returns the stored record."""
+        """Append a pin for `namespace`, chained to the pin before it. Returns the record.
+
+        The chain spans the WHOLE FILE, not one namespace. Per-namespace chaining would
+        let an attacker delete every pin for one namespace and leave the rest verifying
+        clean, which is the same detachment problem the ledger guards against.
+        """
         rec = {
             "namespace": namespace,
             "rows": head.rows,
@@ -104,11 +149,123 @@ class WitnessStore:
             # this timestamp is the witness's, not the publisher's. Left to the
             # caller/server to stamp; None if the store isn't clock-authoritative.
             "received_at": received_at,
+            "prev": self._tail_digest(),
         }
+        # `self` commits the record to its OWN content, which is what protects the TAIL.
+        # `prev` links backwards, so a pure back-chain guards records 1..N-1 and leaves
+        # the last one open — and the last one is the pin a verifier actually reads.
+        rec["self"] = self._digest_record(rec)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec) + "\n")
+        with self.path.open("ab") as fh:
+            payload = (json.dumps(rec) + "\n").encode("utf-8")
+            fh.write(payload)
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass          # network mounts may not support fsync; flush is the floor
+            # Confirm the pin landed. Same reason as the ledger's append: a path that
+            # accepts writes and stores nothing (a Windows reserved device name) would
+            # otherwise return a plausible record for a pin that does not exist.
+            try:
+                landed = fh.tell()
+            except OSError as e:
+                raise OSError("cannot confirm the pin landed in %s: %s" % (self.path, e))
+        if landed < len(payload):
+            raise OSError(
+                "wrote %d bytes to %s but the file holds %d — the pin was discarded, "
+                "nothing was recorded" % (len(payload), self.path, landed))
         return rec
+
+    @staticmethod
+    def _digest_record(rec: dict) -> str:
+        """Digest one pin's CONTENT. Excludes the two derived fields, `prev` and
+        `self`, so the value is reproducible by anyone holding the record."""
+        body = {k: v for k, v in rec.items() if k not in ("prev", "self")}
+        return hashlib.sha256(
+            json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()[:32]
+
+    def _tail_digest(self) -> str:
+        """Digest of the last pin in the file, or GENESIS when the file is empty."""
+        last = None
+        try:
+            for raw in self.path.read_text(encoding="utf-8", errors="replace").split("\n"):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    last = json.loads(raw)
+                except ValueError:
+                    continue          # unparseable line: verify() names it, record() steps past
+        except OSError:
+            return _WITNESS_GENESIS
+        if not isinstance(last, dict):
+            return _WITNESS_GENESIS
+        return self._digest_record(last)
+
+    def verify(self) -> dict:
+        """Recompute the pin chain. Returns a verdict naming the first break by line.
+
+        Three-valued, matching the ledger's own shape:
+          ok=True   — every pin chained and every link recomputed.
+          ok=None   — no break found, but `unchained` legacy pins were skipped. FALSY.
+                      Not a green: a pre-0.9 file cannot be distinguished from a
+                      fabricated prepend, so it does not claim to be.
+          ok=False  — a break was found.
+        """
+        out = WitnessVerify(ok=True, pins=0, chained=0, unchained=0,
+                            breaks=0, first_break=None)
+        try:
+            lines = self.path.read_text(encoding="utf-8", errors="replace").split("\n")
+        except OSError as e:
+            return WitnessVerify({**out, "ok": False, "breaks": 1,
+                                  "first_break": "unreadable: %s" % e})
+        prev_digest = _WITNESS_GENESIS
+        for i, raw in enumerate(lines, 1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                out.update(ok=False, breaks=out["breaks"] + 1)
+                out["first_break"] = out["first_break"] or "line %d: unparseable" % i
+                continue
+            if not isinstance(rec, dict):
+                out.update(ok=False, breaks=out["breaks"] + 1)
+                out["first_break"] = out["first_break"] or "line %d: not a JSON object" % i
+                continue
+            out["pins"] += 1
+            claimed = rec.get("prev")
+            if claimed is None:
+                if out["chained"]:
+                    # An unchained pin AFTER the chain began is a tamper signal, not
+                    # legacy history. Legacy rows can only precede chained ones.
+                    out.update(ok=False, breaks=out["breaks"] + 1)
+                    out["first_break"] = out["first_break"] or (
+                        "line %d: unchained pin after the chain began" % i)
+                else:
+                    out["unchained"] += 1
+                prev_digest = self._digest_record(rec)
+                continue
+            if claimed != prev_digest:
+                out.update(ok=False, breaks=out["breaks"] + 1)
+                out["first_break"] = out["first_break"] or "line %d: pin chain mismatch" % i
+            content = self._digest_record(rec)
+            own = rec.get("self")
+            if own is not None and own != content:
+                # Catches an edit to the LAST pin, which the back-link cannot see.
+                out.update(ok=False, breaks=out["breaks"] + 1)
+                out["first_break"] = out["first_break"] or (
+                    "line %d: pin content does not match its own digest" % i)
+            prev_digest = content
+            out["chained"] += 1
+        if out["ok"] and out["unchained"]:
+            out["ok"] = None          # bounded: legacy pins were not verifiable
+        if out["ok"] and out["pins"] == 0:
+            out["ok"] = None          # an empty store verifies nothing
+        return out
 
     def latest(self, namespace: str) -> dict | None:
         """The most recently recorded pin for `namespace`, or None."""

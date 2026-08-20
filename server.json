@@ -3,7 +3,7 @@
   "name": "io.arcaeon/ledger",
   "title": "Arcaeon Ledger",
   "description": "Tamper-evident action logging for agents: hash-chained append/verify, one JSONL file, zero deps.",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "websiteUrl": "https://arcaeon.io/ai",
   "repository": {
     "url": "https://github.com/dan8433-user/ledger",
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "arcaeon-ledger",
-      "version": "0.5.8",
+      "version": "0.5.9",
       "transport": {
         "type": "stdio"
       },
