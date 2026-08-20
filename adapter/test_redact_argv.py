@@ -70,6 +70,12 @@ MUST_REDACT = [
     ["srv", "AKIAIOSFODNN7EXAMPLE"],
     ["srv", "glpat-REALSECRET"],
     ["srv", "postgres://user:hunter2@db.internal/x"],
+    # Password-only userinfo (redis/mongo standard shape). An auditor found the
+    # with-username form redacted while these leaked: the username segment was
+    # required non-empty. Both must be redacted.
+    ["srv", "redis://:hunter2@cache.internal:6379/0"],
+    ["srv", "mongodb://:hunter2@host/db"],
+    ["srv", "--url", "redis://:hunter2@h:6379"],
 ]
 
 MUST_NOT_TOUCH = [

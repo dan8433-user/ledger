@@ -403,7 +403,11 @@ _SECRET_QS = re.compile(
     r"|auth|credential|sig|signature|x-goog-api-key)=)[^&\s]+", re.I)
 
 #: user:password@host in a URL.
-_URL_USERINFO = re.compile(r"(://)[^/@\s:]+:[^/@\s]+@")
+#: user:pass@host OR password-only :pass@host in a URL. The username segment is
+#: OPTIONAL (`*` not `+`): redis and mongo commonly use `scheme://:password@host`,
+#: and an auditor found the with-username form redacted while the password-only
+#: form leaked. Both must go.
+_URL_USERINFO = re.compile(r"(://)[^/@\s:]*:[^/@\s]+@")
 
 REDACTED = "<redacted>"
 

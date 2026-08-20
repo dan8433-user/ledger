@@ -331,3 +331,34 @@ def test_honest_log_and_witness_still_read_consistent(tmp_path):
     v = verify_against_witness(store, "ns", lg)
     assert v.verdict == "consistent", v
     assert bool(v) is True
+
+
+def test_deleting_the_self_digest_from_the_tail_pin_is_caught(tmp_path):
+    """The bypass an auditor found: edit the tail pin AND delete its `self` field.
+
+    The first version of the self-digest guard only checked `self` when it was
+    PRESENT. So the truncation-laundering attack the whole feature exists to stop
+    reopened: edit the last pin to agree with a truncated log, drop its `self`, and
+    neither the back-link (no successor) nor the self-check (skipped) fires. The tests
+    missed it because every one of them edited `rows` while KEEPING `self`. A chained
+    pin missing its self-digest is now a break.
+    """
+    store, _ = _pins(tmp_path, 4)
+    lines = _lines(store)
+    tail = json.loads(lines[-1]); tail["rows"] = 1; tail.pop("self", None)
+    lines[-1] = json.dumps(tail)
+    _write(store, lines)
+
+    v = store.verify()
+    assert v["ok"] is False, "a chained pin with no self-digest must be a break"
+    assert "missing its self-digest" in v["first_break"], v["first_break"]
+
+
+def test_deleting_self_from_a_middle_pin_is_also_caught(tmp_path):
+    """Not just the tail — any chained pin stripped of its self-digest is a break."""
+    store, _ = _pins(tmp_path, 4)
+    lines = _lines(store)
+    rec = json.loads(lines[1]); rec.pop("self", None)
+    lines[1] = json.dumps(rec)
+    _write(store, lines)
+    assert store.verify()["ok"] is False

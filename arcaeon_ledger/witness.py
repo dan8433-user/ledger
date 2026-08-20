@@ -254,7 +254,19 @@ class WitnessStore:
                 out["first_break"] = out["first_break"] or "line %d: pin chain mismatch" % i
             content = self._digest_record(rec)
             own = rec.get("self")
-            if own is not None and own != content:
+            if own is None:
+                # A CHAINED pin (it has `prev`, so we reached here) MUST carry `self`.
+                # The first version of this guard only checked `self` when present, and
+                # an attacker closed the tail-edit hole by editing the last pin AND
+                # DELETING its `self` field: no successor to catch it via `prev`, no
+                # `self` to catch it directly. That reopened the exact truncation
+                # laundering this whole feature exists to stop. A chained pin missing
+                # its self-digest is now a break, not a skipped check. (Legacy pins are
+                # unchained, handled above at `claimed is None`, and never reach here.)
+                out.update(ok=False, breaks=out["breaks"] + 1)
+                out["first_break"] = out["first_break"] or (
+                    "line %d: chained pin missing its self-digest" % i)
+            elif own != content:
                 # Catches an edit to the LAST pin, which the back-link cannot see.
                 out.update(ok=False, breaks=out["breaks"] + 1)
                 out["first_break"] = out["first_break"] or (

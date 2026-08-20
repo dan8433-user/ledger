@@ -34,10 +34,14 @@ only truthy state.
 an edit to a stored pin detectable. It does not stop someone with write access from
 discarding the file and minting a fresh consistent one, exactly as the ledger's chain
 cannot stop a consistent full rewrite. The protection remains substantially the
-independence of the host. And `verify_against_witness` still answers only whether the
-log agrees with the pin; making it also consult `store.verify()` is a separate change
-and is not in this release. Do not read "the witness has a chain" as "the witness gap
-is closed."
+independence of the host. And `verify_against_witness` NOW consults `store.verify()`:
+two guards run before the comparison, so a forged pin file (`witness_broken`) or a
+locally broken log (`local_broken`) can no longer be reported consistent. An earlier
+draft of this entry described that as a separate release; an auditor caught the
+changelog contradicting the code within the same unreleased 0.5.9, and this is the
+correction. What the witness still cannot do is stop a full re-mint by someone with
+write access, exactly as the ledger chain cannot stop a consistent full rewrite. Do
+not read "the witness has a chain" as "the witness gap is closed."
 
 **And `verify_against_witness` now refuses to bless a broken record.** Once both the
 log and the pin file had chains of their own, the cross-check could finally consult
