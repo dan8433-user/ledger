@@ -291,6 +291,59 @@ def run() -> int:
             print("  SKIP  reserved-device-name check (Windows only) — "
                   "this is a real gap in coverage on this platform, not a pass")
 
+    print("== planted witness-store tampering (the pin file's own chain, observed) ==")
+    # 0.5.9 gave the witness store a chain of its own after 0.5.8 retracted the false
+    # claim that it was tamper-evident by inspection. A buyer who runs this selftest
+    # should see that claim exercised, not just asserted in the changelog. Each case
+    # demands a red on a real edit; the first case is the GREEN control so a verify()
+    # that is broken-by-default fails here too.
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+
+        def fresh_store(name, n=4):
+            lg = Ledger(td / (name + ".jsonl"))
+            st = WitnessStore(td / (name + "-w.jsonl"))
+            for i in range(n):
+                lg.append({"action": "tool_call", "n": i})
+                st.record("selftest", lg.head())
+            return st
+
+        def st_lines(st):
+            return [l for l in st.path.read_text(encoding="utf-8").split("\n") if l.strip()]
+
+        st = fresh_store("clean")
+        v = st.verify()
+        ok = v["ok"] is True and v["pins"] == 4 and v["breaks"] == 0
+        failures += 0 if ok else 1
+        print(f"  {'PASS' if ok else 'FAIL'}  clean pin file -> ok={v['ok']!r} pins={v['pins']}")
+
+        st = fresh_store("edited")
+        lines = st_lines(st)
+        rec = json.loads(lines[1]); rec["rows"] = 1
+        lines[1] = json.dumps(rec)
+        st.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        v = st.verify()
+        ok = v["ok"] is False and v["first_break"] is not None
+        failures += 0 if ok else 1
+        print(f"  {'PASS' if ok else 'FAIL'}  edited middle pin -> ok={v['ok']!r} "
+              f"first_break={v['first_break']!r} (must be a red)")
+
+        st = fresh_store("tail")
+        lines = st_lines(st)
+        rec = json.loads(lines[-1]); rec["rows"] = 999
+        lines[-1] = json.dumps(rec)
+        st.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        v = st.verify()
+        ok = v["ok"] is False and "own digest" in (v["first_break"] or "")
+        failures += 0 if ok else 1
+        print(f"  {'PASS' if ok else 'FAIL'}  edited LAST pin -> ok={v['ok']!r} "
+              f"first_break={v['first_break']!r} (the tail case; must be a red)")
+
+        ok = (not st.verify())
+        failures += 0 if ok else 1
+        print(f"  {'PASS' if ok else 'FAIL'}  broken chain is falsy -> bool(verify)={bool(st.verify())}")
+
+
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else f'{failures} CHECK(S) FAILED'}")
     return 0 if failures == 0 else 1
 
