@@ -39,7 +39,16 @@ log agrees with the pin; making it also consult `store.verify()` is a separate c
 and is not in this release. Do not read "the witness has a chain" as "the witness gap
 is closed."
 
-Full suite green including 20 new witness-chain tests; `selftest` and
+**And `verify_against_witness` now refuses to bless a broken record.** Once both the
+log and the pin file had chains of their own, the cross-check could finally consult
+them. Before this it compared row counts and chain values without ever asking whether
+either side was internally intact — so a forged pin file, or a log broken elsewhere
+than the witnessed row, could still come back `consistent`. Two guards run first:
+`witness_broken` if the pin file fails its own chain, `local_broken` if the log fails
+its own. Both are falsy. Demonstrated red: against the pre-guard code both attacks
+returned `consistent`; the tests that assert otherwise fail there and pass here.
+
+Full suite green including 23 new witness-chain tests; `selftest` and
 `mutation_harness` unchanged and passing.
 
 ## 0.5.8 — four false greens, and a test file that could not detect the drift it was named for

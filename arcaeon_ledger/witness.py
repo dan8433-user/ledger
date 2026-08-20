@@ -320,10 +320,46 @@ def verify_against_witness(store: WitnessStore, namespace: str,
     """Check the ledger against the witness's most recent pin for `namespace`.
 
     This is the outside check the chain alone cannot do. Returns a WitnessVerdict;
-    it is truthy only on "consistent". Honest by construction: a "truncated" or
-    "rewritten" verdict is a positive detection, while a re-fetch that can't reach
-    the witness is left to the caller (no witness => "no_record", never a false ok).
+    it is truthy only on "consistent". Honest by construction: "truncated" and
+    "rewritten" are positive detections, and a re-fetch that can't reach the witness
+    is "no_record", never a false ok.
+
+    Two integrity guards run BEFORE the comparison, added in 0.5.9 once both records
+    gained a chain of their own: if the witness pin file fails its own chain the
+    verdict is "witness_broken", and if the log fails its own chain it is
+    "local_broken". Both are falsy. Without these, a forged pin or a locally tampered
+    log could still be compared and reported "consistent" — the comparison would
+    agree over data that was already broken.
     """
+    # BEFORE any comparison, establish that both records can be trusted at all. A
+    # "consistent" verdict is the truthy state, and returning truthy while either the
+    # witness file or the log is internally broken is the exact container-says-yes
+    # defect this library keeps finding: the comparison would agree, over forged data.
+    #
+    # Witness first. If the pin file fails its own chain, `latest()` may return an
+    # edited pin, so agreeing with it proves nothing. ok is False is a real break;
+    # ok=None (legacy unchained pins) is bounded, not tampered, and does NOT block.
+    wv = store.verify()
+    if wv.get("ok") is False and wv.get("pins", 0) > 0:
+        # pins > 0 is the difference between a TAMPERED witness and an ABSENT one.
+        # A missing or empty file reads as ok=False/unreadable but holds no pins, and
+        # that is a legitimate no-pin state that falls through to "no_record" below —
+        # not a break. Only a genuine chain break AMONG real pins blocks here.
+        return WitnessVerdict(
+            "witness_broken",
+            "the witness pin file fails its own chain (%s): a pin from a tampered "
+            "witness cannot be trusted, so no comparison is meaningful"
+            % wv.get("first_break"))
+
+    # Then the log itself. Agreeing with a pin at one row says nothing about a log
+    # whose own chain is already broken elsewhere.
+    lv = ledger.verify()
+    if lv.ok is False:
+        return WitnessVerdict(
+            "local_broken",
+            "the log fails its own chain (%s): witness agreement at the pinned row "
+            "does not make a locally tampered log consistent" % lv.first_break)
+
     pin = store.latest(namespace)
     if pin is None:
         return WitnessVerdict("no_record",

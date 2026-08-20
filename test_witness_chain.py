@@ -285,3 +285,49 @@ def test_latest_and_history_still_work_with_the_chain(tmp_path):
     assert store.latest("ns")["rows"] == 3
     assert [h["rows"] for h in store.history("ns")] == [1, 2, 3]
     assert store.latest("absent") is None
+
+
+# -- verify_against_witness now refuses to bless broken records ----------------
+
+def test_a_forged_pin_file_blocks_consistent(tmp_path):
+    """A witness whose own chain is broken cannot bless a log.
+
+    Before 0.5.9 verify_against_witness never checked the pin file's integrity, so an
+    attacker who could write to the witness edited a pin to match a truncated log and
+    the verdict came back 'consistent'. Now the pin file's own chain is checked first.
+    """
+    from arcaeon_ledger.witness import verify_against_witness
+    store, lg = _pins(tmp_path, 4)
+    # truncate the log to 4 -> still fine; now forge the pin to agree, breaking its chain
+    lines = _lines(store)
+    rec = json.loads(lines[1]); rec["rows"] = 1
+    lines[1] = json.dumps(rec)
+    _write(store, lines)
+
+    v = verify_against_witness(store, "ns", lg)
+    assert v.verdict == "witness_broken", v
+    assert not v, "a broken witness must be falsy, never consistent"
+
+
+def test_a_locally_broken_log_blocks_consistent(tmp_path):
+    """A log whose own chain is broken is not made consistent by agreeing at one row."""
+    from arcaeon_ledger.witness import verify_against_witness
+    store, lg = _pins(tmp_path, 4)
+    # tamper the LOG in place, leaving the witness file honest
+    llines = [l for l in lg.path.read_text(encoding="utf-8").split("\n") if l.strip()]
+    obj = json.loads(llines[2]); obj["i"] = 999
+    llines[2] = json.dumps(obj, ensure_ascii=False)
+    lg.path.write_text("\n".join(llines) + "\n", encoding="utf-8")
+
+    v = verify_against_witness(store, "ns", lg)
+    assert v.verdict == "local_broken", v
+    assert not v
+
+
+def test_honest_log_and_witness_still_read_consistent(tmp_path):
+    """The guards must not false-alarm on the ordinary case."""
+    from arcaeon_ledger.witness import verify_against_witness
+    store, lg = _pins(tmp_path, 4)
+    v = verify_against_witness(store, "ns", lg)
+    assert v.verdict == "consistent", v
+    assert bool(v) is True
