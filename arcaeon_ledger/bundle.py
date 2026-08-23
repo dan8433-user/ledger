@@ -142,6 +142,15 @@ def _readme_text(ledger_name: str, ledger_sha: str, verify_report: dict,
     if ok is True:
         verdict_line = ("VERDICT: intact. Every row was checked in strict mode and the "
                         "hash chain holds end to end.")
+    elif verify_report.get("prechain_adoption"):
+        lr = verify_report["lenient_result"]
+        verdict_line = ("VERDICT: intact from adoption onward. This log was adopted over "
+                        "pre-existing history: the rows before the first chained row carry "
+                        "no chain and are not cryptographically verifiable (that is expected, "
+                        "not tampering). From the first chained row to the end, the hash "
+                        "chain holds — see lenient_result (ok=null, scope "
+                        f"'{lr.get('verified_scope')}'). Strict mode reports these pre-chain "
+                        "rows as breaks by design; that is not evidence of alteration.")
     elif ok is False:
         verdict_line = ("VERDICT: BROKEN. Strict verification found "
                         f"{r.get('breaks')} break(s); first break: {r.get('first_break')}. "
@@ -276,8 +285,18 @@ def build_bundle(ledger_path: str | Path, *, out: str | Path | None = None,
 
     ledger_name = src.name if src.name not in _RESERVED_NAMES else "ledger_" + src.name
 
-    # Strict verify — read-only over the source file.
+    # Verify read-only over the source file. Strict is the headline check, but an
+    # honestly-adopted log (legacy pre-chain rows before the first chained row — a
+    # first-class feature per the package docstring) fails strict for a reason that
+    # is NOT tampering. Running non-strict alongside lets the bundle tell the two
+    # apart instead of branding an adopter's log "BROKEN" (external audit 2026-08-23:
+    # the bundle's strict brand contradicted the verifier's own three-valued honesty
+    # on the exact workflow the README sells).
     result = verify_file(src, strict=True)
+    lenient = verify_file(src, strict=False)
+    # strict-broken but lenient-clean-modulo-prechain = adoption, not tampering.
+    prechain_only = (result.ok is False and lenient.ok is None
+                     and lenient.verified_scope == "bounded_prechain_skipped")
     verify_report = {
         "package": "arcaeon-ledger",
         "package_version": __version__,
@@ -287,6 +306,8 @@ def build_bundle(ledger_path: str | Path, *, out: str | Path | None = None,
         "exit_code_semantics": {"0": "fully verified", "1": "broken or usage error",
                                 "3": "verified within scope only (non-strict mode only)"},
         "result": dict(result.__dict__),
+        "lenient_result": dict(lenient.__dict__),
+        "prechain_adoption": prechain_only,
         "generated_at": generated_at,
     }
 
