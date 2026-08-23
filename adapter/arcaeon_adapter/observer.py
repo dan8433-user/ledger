@@ -52,6 +52,8 @@ import time
 import uuid
 from typing import Any, Callable
 
+from ._version import IMPL
+
 SEAM = "mcp-stdio"
 
 #: Frames longer than this are relayed but not logged (see module docstring).
@@ -76,6 +78,17 @@ class FrameSplitter:
         #: Count of frames abandoned for exceeding `max_frame`. Surfaced in
         #: `session_end` so an oversized-frame gap is visible, never silent.
         self.dropped_oversize = 0
+        #: Count of `observe()` callbacks that raised. Incremented by `proxy.relay`,
+        #: which owns the swallow; it lives here because this is the object the
+        #: proxy already keeps per-direction and reads after the threads are done.
+        #: Same contract as `dropped_oversize`: swallowing the failure is policy,
+        #: hiding it is not — surfaced in `session_end`.
+        self.observe_failures = 0
+        #: Count of relay loops ended by an exception (broken pipe, read-side EIO,
+        #: write-to-closed-file) rather than clean EOF. Usually a benign shutdown
+        #: race — but "usually" is a guess, so the count rides out in `session_end`
+        #: and the reader decides. Also incremented by `proxy.relay`.
+        self.relay_errors = 0
 
     def feed(self, chunk: bytes) -> list[bytes]:
         out: list[bytes] = []
@@ -171,7 +184,7 @@ class SeamObserver:
 
     def __init__(self, emit: Callable[[dict], Any], *, server: str,
                  session: str | None = None, raw: bool = False,
-                 impl: str = "arcaeon-adapter/0.1.1",
+                 impl: str = IMPL,  # from _version — the ONE place the version lives
                  clock: Callable[[], float] = time.monotonic):
         self._emit = emit
         self.server = server

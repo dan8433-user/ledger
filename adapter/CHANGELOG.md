@@ -1,5 +1,76 @@
 # Changelog
 
+## Unreleased
+
+**HONESTY: the redactor was fabricating evidence, confirmed live by an independent
+audit.** Four probes, all damaged with `command_redactions=1`: `--auth none` — a server
+with authentication DISABLED, the exact scar class the 0.1.0 fix was named for —
+recorded as credential-stripped; `--auth basic` and `--oauth google` lost their
+mode/provider words the same way; `--authors Jane` lost a value because "auth" was
+matched as a SUBSTRING of the name; and `pip install sk-learn-extras` lost a package
+name to the `sk-` value shape. Three fixes, all in the direction the file's own doctrine
+orders (fabricating a redaction is worse than missing one):
+
+- Name words now match at separator boundaries only: `auth-token`, `API_TOKEN`, and
+  `x-auth` still name secret slots; `--authors` and `--oauth` never did and now never
+  match. `authorization` is spelled out since the boundary rule would otherwise drop it.
+- A credential-NAMED flag no longer eats its following value unconditionally. A value
+  that is a plain short dictionary word (`none`, `basic`, `google` — all-lowercase
+  letters, ≤12 chars) survives, in both the two-token and `--auth=none` forms; anything
+  secret-shaped or longer/mixed/digit-bearing is still redacted. The declared residual:
+  a password that IS a short dictionary word in a named slot now survives into the
+  record — the accepted direction of error.
+- The `sk-` value shape now demands what every real issued key has — ≥20 chars plus a
+  digit or mixed case — before redacting, so package names pass through untouched while
+  `sk-proj-...` / `sk-ant-api03-...` keys still never reach the file.
+
+All six probes are permanent MUST_NOT_TOUCH corpus cases (each observed red before the
+fix), alongside three deliberately-green MUST_REDACT guards pinning the redactions the
+fix was required to preserve (`--auth-token <secret>`, `--api-key=sk-ant-...`,
+`API_TOKEN=ghp_...`). Corpus: 54 cases, 34 observed red.
+
+**A second hardcoded version, found by the same audit.** `SeamObserver.__init__`
+defaulted `impl` to a literal `"arcaeon-adapter/0.1.1"` — a copy
+`test_version_is_declared_in_exactly_one_place` never saw, positioned to stamp stale
+`seam_impl` values on rows after the next bump. The default now imports `IMPL` from
+`_version.py`, and the test grew two teeth: the observer's stamped default must equal
+the constant, and NO file in the package other than `_version.py` may contain a
+version-shaped literal at all, so a future hardcode fails even while its value is
+still current — which is exactly how this one stayed invisible.
+
+**SECURITY: the redactor never checked the VALUE half of `NAME=VALUE` tokens against
+the value-shape rules.** The whole-token `_SECRET_VALUE` match is anchored at the
+token's start, so `STRIPE_KEY=sk_live_...`, `OPENAI_KEY=sk-proj-...`, `GH_PAT=ghp_...`
+and a JWT in any innocently-named variable all passed through untouched with
+`command_redactions=0` — the value-shape rule, the one defence that works when the
+slot name says nothing, went blind exactly where secrets most often sit. The VALUE
+half of every `NAME=VALUE` token is now run against the value shapes; only the value
+half is replaced, and the hit is counted.
+
+**SECURITY: `--key AIzaSy...` leaked.** Bare `key` was not a recognised slot name and
+Google's `AIza` prefix was not a recognised value shape. Both added: `key` matches as
+an EXACT name only (`--keyboard` and `MY_KEY` are untouched — substring-matching is
+how `--no-auth` got eaten by "auth" in 0.1.0), and `AIza...` is now redacted wherever
+it sits.
+
+**Swallowed failures are now counted failures.** The relay swallows observer
+exceptions by design (a logging bug must never break transport) and treats read/write
+OSErrors as shutdown races. Both policies stand, but both were invisible: an observer
+raising on every frame produced a `session_end` indistinguishable from a clean run,
+while the equivalent gap from an oversized frame WAS reported. `session_end` now
+carries `observe_failures` and `relay_errors` on the same contract as
+`oversize_frames_unlogged`: omitted when zero, present when the record has a hole.
+The client->server relay thread is also joined (bounded, 1s) before the counters are
+read, closing the race where an increment landing a beat after child exit was lost.
+
+**Test corpus hardened.** Redaction assertions now pin the literal placeholder string
+instead of importing it from the module under test; a multi-secret case pins the exact
+hit count; every MUST_REDACT case now also asserts the non-secret argv positions come
+back byte-identical (a shredder mutant passed the old assertions and fails the new
+ones — all three mutants were run and observed red); corpus cases added for all the
+shapes above plus over-redaction guards (`MY_KEY=not-a-secret-word`,
+`--keyboard=qwerty`, `COUNT=12345`).
+
 ## 0.1.1 — 2026-08-19 — SECURITY. Upgrade from 0.1.0.
 
 Two defects, both breaking the one property this package

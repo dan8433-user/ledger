@@ -205,11 +205,18 @@ def relay(src, dst, observe=None, *, on_eof=None, corruptor=None,
                     try:
                         observe(frame)
                     except Exception:
-                        pass  # observation is never allowed to break transport
+                        # Observation is never allowed to break transport — but a
+                        # swallowed failure must still be a COUNTED failure, or an
+                        # observer that raises on every frame produces a session_end
+                        # indistinguishable from a clean run.
+                        splitter.observe_failures += 1
     except (BrokenPipeError, OSError, ValueError):
         # ValueError = "write to closed file": the other side of the proxy already
-        # tore down. Both are normal shutdown races, not errors worth surfacing.
-        pass
+        # tore down. Usually a normal shutdown race — but a read-side I/O error
+        # lands here too, so it is counted rather than presumed benign. The count
+        # rides out in `session_end`; the reader decides what it meant.
+        if splitter is not None:
+            splitter.relay_errors += 1
     finally:
         if corruptor is not None:
             try:
@@ -224,7 +231,7 @@ def relay(src, dst, observe=None, *, on_eof=None, corruptor=None,
                 try:
                     observe(frame)
                 except Exception:
-                    pass
+                    splitter.observe_failures += 1  # same contract as the loop above
         if on_eof is not None:
             try:
                 on_eof()
@@ -337,17 +344,28 @@ def run(command: list[str], ledger_path: str, *, server: str | None = None,
         code = child.wait()
         down.join(timeout=5.0)
 
-    # `up` is a daemon blocked on a stdin read that may never return; we do not
-    # join it. Its only remaining job (closing the child's stdin) is moot now.
+    # `up` may be a daemon blocked on a stdin read that never returns, so this
+    # join is BOUNDED: it exists to close the race between the up thread's last
+    # counter increments (a write can complete, then the bookkeeping be preempted
+    # past the child's exit) and the counter reads below — not to wait on a client
+    # that hasn't hung up. If the timeout expires, the counters are read anyway:
+    # best-effort figures beat blocking shutdown on a dead session.
+    up.join(timeout=1.0)
     orphans = obs.flush_pending(reason=f"session_ended:{reason}")
     # An oversized frame is relayed but NOT logged. That is a real hole in the
     # record, so it rides out in `session_end` rather than staying our secret: a
     # reviewer seeing a nonzero count knows the seam log is incomplete and by how
     # many frames. Omitted entirely when zero, so the field's presence is the
-    # signal.
+    # signal. `observe_failures` and `relay_errors` get the identical treatment,
+    # because a swallowed exception is the same kind of hole as a dropped frame:
+    # survivable, and only honest if declared.
     oversize = up_split.dropped_oversize + down_split.dropped_oversize
+    observe_failures = up_split.observe_failures + down_split.observe_failures
+    relay_errors = up_split.relay_errors + down_split.relay_errors
     obs.session_end(reason=reason, exit_code=code, unanswered=orphans or None,
-                    oversize_frames_unlogged=oversize or None)
+                    oversize_frames_unlogged=oversize or None,
+                    observe_failures=observe_failures or None,
+                    relay_errors=relay_errors or None)
     return code
 
 
@@ -360,9 +378,19 @@ def _digest(value) -> str:
 #: `--api-key=X` and the dashless `API_KEY=X`, because a secret is defined by the slot
 #: it sits in rather than by how the value looks.
 _SECRET_NAME = re.compile(
-    r"^[\w.-]*(?:api[_-]?key|apikey|secret|password|passwd|token|bearer|auth"
-    r"|credential|private[_-]?key|access[_-]?key|client[_-]?secret|session[_-]?key)"
-    r"[\w.-]*$", re.I)
+    r"^(?:key"  # bare `key`, EXACT match only: `--key` is how Google's own docs pass an
+                # API key, but the word must not reach into `--keyboard` or `MY_KEY` —
+                # substring-matching "key" is how `--no-auth` got eaten by "auth".
+    # Every other word must sit at SEPARATOR boundaries: any prefix ends at `_./-`
+    # and any suffix begins at one. `auth-token`, `API_TOKEN`, `x-auth` still match;
+    # `--authors` and `--oauth` no longer do — the 2026-08-21 audit found "auth"
+    # matching INSIDE "authors" and the token after it eaten, the same substring sin
+    # the bare-`key` comment above already names. `authorization` is spelled out
+    # because the boundary rule would otherwise lose it.
+    r"|(?:[\w.-]*[_.-])?"
+    r"(?:api[_-]?key|apikey|secret|password|passwd|token|bearer|auth(?:orization)?"
+    r"|credentials?|private[_-]?key|access[_-]?key|client[_-]?secret|session[_-]?key)"
+    r"(?:[_.-][\w.-]*)?)$", re.I)
 
 #: Names that MATCH _SECRET_NAME but do NOT carry a secret. This list is the fix for the
 #: redactor damaging its own record: `--no-auth` contains "auth", so the first cut treated
@@ -376,18 +404,37 @@ _NOT_A_SECRET_SLOT = re.compile(
     r"|source|provider|algorithm|alg|required|enabled|disabled)$", re.I)
 
 #: Values recognizable as credentials wherever they sit. Deliberately shape-based and
-#: deliberately a BONUS: the name rules above are the defence. The hyphen forms matter
-#: most in practice — every current LLM vendor issues `sk-...`, and the first cut carried
-#: only Stripe's underscore form, which for a product sold to agent operators meant it
-#: missed the two most likely real secrets on any command line it would ever see.
+#: deliberately a BONUS: the name rules above are the defence. The underscore forms are
+#: prefix-sufficient (nothing else on a command line begins `sk_live_`), but the hyphen
+#: `sk-` prefix is NOT — every current LLM vendor issues it AND the Python ecosystem
+#: publishes package names under it, and the 2026-08-21 audit caught
+#: `pip install sk-learn-extras` recorded as credential-stripped. So `sk-` lives in
+#: `_SK_CANDIDATE` below and `_looks_like_secret_value` finishes the call, demanding
+#: the length and character mixture a real issued key always has.
 _SECRET_VALUE = re.compile(
-    r"^(?:sk-[A-Za-z0-9]{2,}-|sk-[A-Za-z0-9]{16,}"          # sk-proj-, sk-ant-api03-, sk-...
-    r"|sk_live_|sk_test_|rk_live_|whsec_"
+    r"^(?:sk_live_|sk_test_|rk_live_|whsec_"
     r"|ghp_|gho_|ghu_|ghs_|github_pat_"
     r"|xox[baprs]-|glpat-|dop_v1_|shpat_|SG\.[A-Za-z0-9_-]{10,}"
     r"|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}"
+    r"|AIza[0-9A-Za-z_-]{10,}"                               # Google API key
     r"|eyJ[A-Za-z0-9_-]{10,}\."                              # a JWT
     r"|-----BEGIN)", re.I)
+
+#: An `sk-` token that MIGHT be an OpenAI/Anthropic-style key — or might be a package
+#: name. `_looks_like_secret_value` decides which.
+_SK_CANDIDATE = re.compile(r"^sk-[A-Za-z0-9_-]{2,}$", re.I)
+
+#: A short plain dictionary-shaped word: letters only, all lowercase after an optional
+#: leading capital, twelve characters or fewer — `none`, `basic`, `google`, `oidc`.
+#: What a credential-NAMED flag's value must NOT look like before it is eaten:
+#: "auth" names a TOPIC as often as it names a secret, and `--auth none` is a server
+#: with authentication DISABLED. The first cut blanked that `none` and wrote the exact
+#: false record `_NOT_A_SECRET_SLOT`'s comment describes — a credential-stripped row
+#: over an auth-off launch. Real credentials carry length, digits, case mixture, or
+#: punctuation; a bare short word carries configuration. A password that happens to BE
+#: a short dictionary word will now survive in the record, and that is the accepted
+#: direction of error: fabricating a redaction is worse than missing one.
+_MODE_WORD = re.compile(r"^[A-Za-z][a-z]{0,11}$")
 
 #: Header names whose value is a credential, for `--header "Authorization: Bearer X"`.
 _SECRET_HEADER = re.compile(
@@ -419,6 +466,32 @@ def _looks_like_secret_slot(name: str) -> bool:
     return bool(_SECRET_NAME.match(name.lstrip("-")))
 
 
+def _looks_like_secret_value(tok: str) -> bool:
+    """Is this token, by its own shape, recognizably a credential?
+
+    Most prefixes decide by themselves (`ghp_`, `AKIA`, `AIza`). The `sk-` prefix
+    cannot: real issued keys share it with published package names. A real key is
+    long (the shortest current vendor form is well past 20 characters) and carries
+    digits or mixed case; `sk-learn-extras` is short, lowercase, and digitless.
+    Demand the former before calling an sk- token a secret.
+    """
+    if _SK_CANDIDATE.match(tok):
+        return len(tok) >= 20 and (
+            any(c.isdigit() for c in tok)
+            or (tok.lower() != tok and tok.upper() != tok))
+    return bool(_SECRET_VALUE.match(tok))
+
+
+def _plausible_credential(tok: str) -> bool:
+    """May a value sitting in a credential-NAMED slot be redacted as a secret?
+
+    Yes when it is secret-shaped, or when it is anything other than a short
+    dictionary word. `--auth none`, `--auth basic`, `--auth=none` keep their mode
+    words — see `_MODE_WORD` for why that asymmetry is the honest one.
+    """
+    return _looks_like_secret_value(tok) or not _MODE_WORD.match(tok)
+
+
 def _redact_argv(command):
     """Strip credentials out of a wrapped server's command line.
 
@@ -446,7 +519,10 @@ def _redact_argv(command):
     row claiming a credential had been stripped from a server that was in fact launched
     with authentication turned off. A confidently wrong evidence file is worse than an
     unredacted one, so the value-consuming path now refuses to eat anything that starts
-    with `-` and refuses slots on the negative list.
+    with `-`, refuses slots on the negative list, refuses names that only contain a
+    credential word as a SUBSTRING (`--authors` is not `--auth`), and refuses values
+    that are plain short dictionary words (`--auth none` is a server with auth
+    DISABLED, and `none`/`basic`/`google` are configuration, not credentials).
 
     STATED LIMITS, because a redactor that quietly misses a class manufactures confidence.
     It cannot recognise a credential in an arbitrarily-named slot (`--k9 hunter2`), or a
@@ -469,22 +545,39 @@ def _redact_argv(command):
 
         # A pending credential slot from the previous token.
         if expect_secret_for is not None:
+            expect_secret_for = None
             # Never consume another flag: `--token --verbose` means the flag took no
             # value, and blanking `--verbose` would delete configuration and invent a
-            # credential that was never there.
-            if tok.startswith("-"):
-                expect_secret_for = None
-            else:
+            # credential that was never there. And never consume a MODE WORD:
+            # `--auth none` / `--auth basic` / `--oauth google` say HOW a thing is
+            # configured, and eating the word records an auth-disabled server as a
+            # credential-stripped one — the false-record class again, found live by
+            # the 2026-08-21 audit. Only a token that could plausibly BE a
+            # credential is eaten; anything spared falls through and is processed
+            # like any other token.
+            if not tok.startswith("-") and _plausible_credential(tok):
                 out.append(REDACTED)
                 hits += 1
-                expect_secret_for = None
                 continue
 
         # NAME=VALUE, with or without leading dashes. Covers `--token=X` and the
         # dashless `API_KEY=X` that the first version of this function never inspected.
         if "=" in tok:
             name, _, value = tok.partition("=")
-            if value and _looks_like_secret_slot(name):
+            # The mode-word exemption applies here too: `--auth=none` states the
+            # same disabled-auth fact as `--auth none`, and the record must keep it.
+            if value and _looks_like_secret_slot(name) and _plausible_credential(value):
+                out.append("%s=%s" % (name, REDACTED))
+                hits += 1
+                continue
+            # The NAME is innocent but the VALUE half is a recognisable credential:
+            # `MY_KEY=sk_live_...`, `GH_PAT=ghp_...`. The whole-token _SECRET_VALUE
+            # check below is anchored at the token's START, so a value sitting after
+            # `NAME=` was never inspected at all — which meant the value-shape rule,
+            # the one defence that works when the slot name says nothing, went blind
+            # exactly where secrets most often sit. Redact the value half only; the
+            # name stays, because the name is audit-relevant and not a secret.
+            if value and _looks_like_secret_value(value):
                 out.append("%s=%s" % (name, REDACTED))
                 hits += 1
                 continue
@@ -503,7 +596,7 @@ def _redact_argv(command):
             expect_secret_for = tok
             continue
 
-        if _SECRET_VALUE.match(tok):
+        if _looks_like_secret_value(tok):
             out.append(REDACTED)
             hits += 1
             continue

@@ -9,16 +9,19 @@ messages", not "the same JSON", the same BYTES.
 
 Run: pytest -q
 """
+import io
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from arcaeon_adapter._ledger import verify_seam_log
-from arcaeon_adapter.proxy import FAULT_ENV, _Corruptor, _server_label
+from arcaeon_adapter.observer import FrameSplitter, SeamObserver
+from arcaeon_adapter.proxy import FAULT_ENV, _Corruptor, _server_label, relay
 
 ROOT = str(Path(__file__).resolve().parent)
 ECHO = [sys.executable, "-m", "arcaeon_adapter._echo_server"]
@@ -167,11 +170,40 @@ def test_dash_m_package_shorthand_is_equivalent(tmp_path):
 
 def test_version_is_declared_in_exactly_one_place():
     """`seam_impl` is stamped on every row; two copies of the version would drift
-    and rows would start lying about which build wrote them."""
+    and rows would start lying about which build wrote them.
+
+    Two teeth beyond the constant-identity check, both grown after an audit found
+    `SeamObserver.__init__` carrying its own hardcoded "arcaeon-adapter/0.1.1" —
+    a second place the version lived, which this test as first written never saw:
+
+    1. The default a SeamObserver stamps when nobody passes `impl` must equal the
+       constant. (Equality, not identity — string interning makes `is` on equal
+       literals implementation-defined, and the literal-hunt below is what catches
+       a copied string anyway.)
+    2. No file in the package other than `_version.py` may contain a version-shaped
+       literal at all, so a future hardcode fails even if its value happens to be
+       current at the time it is written — which is exactly how the observer.py one
+       stayed invisible.
+    """
+    import pathlib
+    import re
+
     import arcaeon_adapter
-    from arcaeon_adapter import _version, proxy
+    from arcaeon_adapter import _version, observer, proxy
     assert arcaeon_adapter.VERSION is _version.VERSION is proxy.VERSION
     assert proxy.IMPL == f"arcaeon-adapter/{proxy.VERSION}"
+    assert observer.SeamObserver.__init__.__kwdefaults__["impl"] == _version.IMPL
+    pkg = pathlib.Path(arcaeon_adapter.__file__).parent
+    offenders = [
+        "%s:%d: %s" % (py.name, lineno, line.strip())
+        for py in sorted(pkg.glob("*.py")) if py.name != "_version.py"
+        for lineno, line in enumerate(
+            py.read_text(encoding="utf-8").splitlines(), 1)
+        if re.search(r"arcaeon-adapter/\d", line)
+    ]
+    assert not offenders, (
+        "version-shaped literal outside _version.py (a second copy will drift):\n  "
+        + "\n  ".join(offenders))
 
 
 def test_child_stderr_is_inherited_not_swallowed(tmp_path):
@@ -327,3 +359,100 @@ def test_oversize_frame_is_relayed_but_reported_as_unlogged(tmp_path):
     assert p.stdout == control.stdout          # fidelity is unaffected by the cap
     end = _rows(ledger)[-1]
     assert end["oversize_frames_unlogged"] >= 1
+
+
+# -- silent failures made countable -------------------------------------------
+#
+# The relay swallows observer exceptions BY DESIGN (a logging bug must never
+# become a transport failure), and it treats read/write OSErrors as shutdown
+# races. Both policies are right; both were also INVISIBLE: an observer that
+# raised on every frame left a session_end indistinguishable from a clean one,
+# while an oversized frame — the same kind of survivable logging gap — was
+# counted and reported. These tests hold the swallow to the oversize standard:
+# swallowed, AND counted, AND declared in session_end.
+
+_QUIET_CHILD = [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"]
+
+
+def test_observe_exceptions_are_counted_not_just_swallowed():
+    """relay() must keep transport intact AND tally each swallowed observe error."""
+    frames = _tool(1, "echo", {"text": "a"}) + b"\n" + _tool(2, "echo", {"text": "b"}) + b"\n"
+    src, dst = io.BytesIO(frames), io.BytesIO()
+    sp = FrameSplitter()
+
+    def broken_observer(frame):
+        raise RuntimeError("observer bug")
+
+    relay(src, dst, broken_observer, splitter=sp)
+    assert dst.getvalue() == frames, "the swallow exists to protect transport"
+    assert sp.observe_failures == 2
+
+
+def test_observe_failures_are_reported_in_session_end(tmp_path, monkeypatch):
+    """An observer failing on every frame must be a DECLARED hole, like oversize."""
+    from arcaeon_adapter import proxy as proxy_mod
+
+    class _Sabotaged(SeamObserver):
+        def observe_client_frame(self, raw):
+            raise RuntimeError("observer bug")
+
+    monkeypatch.setattr(proxy_mod, "SeamObserver", _Sabotaged)
+    ledger = tmp_path / "obsfail.jsonl"
+    stream = _tool(1, "echo", {"text": "x"}) + b"\n"
+    proxy_mod.run(_QUIET_CHILD, str(ledger), stdin=io.BytesIO(stream),
+                  stdout=io.BytesIO())
+    end = [r for r in _rows(ledger) if r["evt"] == "session_end"][-1]
+    assert end.get("observe_failures", 0) >= 1, (
+        "an observer that raised left no trace in session_end: %s" % end)
+
+
+def test_read_side_oserror_is_counted_not_presumed_normal():
+    """EIO on the source is caught as a shutdown race. Fine — but count it."""
+    class _EIOStream:
+        def read1(self, n):
+            raise OSError(5, "Input/output error")
+
+    sp = FrameSplitter()
+    relay(_EIOStream(), io.BytesIO(), lambda f: None, splitter=sp)
+    assert sp.relay_errors == 1
+
+
+def test_relay_errors_are_reported_in_session_end(tmp_path):
+    """The counted shutdown-race exception must ride out in session_end."""
+    from arcaeon_adapter import proxy as proxy_mod
+
+    class _EIOStream:
+        def read1(self, n):
+            raise OSError(5, "Input/output error")
+
+    ledger = tmp_path / "eio.jsonl"
+    proxy_mod.run(_QUIET_CHILD, str(ledger), stdin=_EIOStream(), stdout=io.BytesIO())
+    end = [r for r in _rows(ledger) if r["evt"] == "session_end"][-1]
+    assert end.get("relay_errors", 0) >= 1, (
+        "a read-side I/O error left no trace in session_end: %s" % end)
+
+
+def test_upstream_counters_are_read_only_after_the_thread_is_joined(tmp_path, monkeypatch):
+    """Pins the up-thread join before the counter reads.
+
+    The race being closed: the up thread's last counter increment can land a beat
+    after the child exits (write done, bookkeeping preempted), while the main thread
+    is already composing session_end from those counters. Reproduced deterministically
+    by wrapping relay() so the up thread's final increment arrives 0.3s late; without
+    a bounded join, session_end reads zero and the gap goes undeclared.
+    """
+    from arcaeon_adapter import proxy as proxy_mod
+    real_relay = proxy_mod.relay
+
+    def slow_finish_relay(src, dst, observe=None, **kw):
+        real_relay(src, dst, observe, **kw)
+        if kw.get("on_eof") is not None:            # the client->server thread
+            time.sleep(0.3)                          # preempted mid-bookkeeping
+            kw["splitter"].dropped_oversize += 1
+
+    monkeypatch.setattr(proxy_mod, "relay", slow_finish_relay)
+    ledger = tmp_path / "race.jsonl"
+    proxy_mod.run(_QUIET_CHILD, str(ledger), stdin=io.BytesIO(b""), stdout=io.BytesIO())
+    end = [r for r in _rows(ledger) if r["evt"] == "session_end"][-1]
+    assert end.get("oversize_frames_unlogged", 0) == 1, (
+        "a counter increment racing session_end was lost: %s" % end)

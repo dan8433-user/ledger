@@ -351,7 +351,19 @@ def verify_against_witness(store: WitnessStore, namespace: str,
     # Witness first. If the pin file fails its own chain, `latest()` may return an
     # edited pin, so agreeing with it proves nothing. ok is False is a real break;
     # ok=None (legacy unchained pins) is bounded, not tampered, and does NOT block.
-    wv = store.verify()
+    #
+    # CONTRACT COMPATIBILITY (2026-08-23, caught by arcaeon-audit's suite): the
+    # documented witness contract downstream — arcaeon-audit's docstring and
+    # CHANGELOG — is "any object exposing .latest(namespace)". Requiring .verify()
+    # unconditionally broke every hosted/remote witness client the moment this
+    # method appeared. A store that cannot self-verify is not thereby BROKEN; its
+    # self-integrity is simply UNESTABLISHED — three-valued, like everything else
+    # here. The comparison proceeds and the caller's witness block still records
+    # the store's nature (self-declared vs undeclared) for the reader to weigh.
+    _verify = getattr(store, "verify", None)
+    wv = _verify() if callable(_verify) else {"ok": None, "pins": None,
+                                              "note": "store exposes no verify(); "
+                                                      "self-integrity unestablished"}
     if wv.get("ok") is False and wv.get("pins", 0) > 0:
         # pins > 0 is the difference between a TAMPERED witness and an ABSENT one.
         # A missing or empty file reads as ok=False/unreadable but holds no pins, and
