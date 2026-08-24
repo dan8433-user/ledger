@@ -77,13 +77,43 @@ jobs:
           code=$?
           set -e
           if [ "$code" -eq 5 ]; then
-            # Exit 5 = "no tests collected". Real today only for arcaeon-all (a dependency-
-            # umbrella meta-package with no tests of its own, not yet pushed to GitHub) — treat
-            # as a pass rather than a red X so this template doesn't need an exception file.
-            echo "pytest collected zero tests — treating as pass (meta-package or empty suite)."
-            exit 0
+            # Exit 5 = "no tests collected".
+            #
+            # This USED to exit 0 unconditionally, with an honest reason (one repo
+            # in this line, arcaeon-all, is a dependency-umbrella meta-package with
+            # no tests of its own) and a dishonest consequence: for the other eight
+            # repos, a renamed file, a moved test directory, or a conftest import
+            # error collects zero tests and renders IDENTICALLY to a clean run of
+            # several hundred. "0 passed" and "0 looked at" printed the same green
+            # check, at the layer that would hide every other check.
+            #
+            # An intentionally-empty suite is now DECLARED, not inferred. A repo
+            # that genuinely ships no tests carries a `.no-tests` file saying why;
+            # anything else that collects zero is a failure, loudly.
+            if [ -f ".no-tests" ]; then
+              echo "pytest collected zero tests, and .no-tests declares this repo"
+              echo "intentionally ships none. Stated reason:"
+              cat .no-tests
+              exit 0
+            fi
+            echo "::error::pytest collected ZERO tests and this repo does not declare"
+            echo "::error::itself test-free. This is a FAILURE, not a pass: a suite that"
+            echo "::error::vanished (rename, moved dir, conftest import error) looks exactly"
+            echo "::error::like a suite that passed. If this repo really has no tests, add a"
+            echo "::error::.no-tests file stating why, so the exception is on the record."
+            exit 1
           fi
           exit $code
+
+      - name: Report how many tests actually ran
+        # A count in the log is the cheapest defence against a suite quietly
+        # shrinking: a green check says nothing about how much was checked.
+        if: always()
+        run: |
+          set +e
+          collected=$(pytest --collect-only -q 2>/dev/null | tail -1)
+          set -e
+          echo "collected: ${collected:-unknown}"
 
       - name: Run package selftest (if the package ships one)
         run: |
@@ -92,21 +122,51 @@ jobs:
           import subprocess
           import sys
 
+          # DISCOVERY USED TO STOP AT THE FIRST MATCH and required an __init__.py
+          # beside the selftest. Both were silent coverage holes: a repo shipping
+          # TWO selftests only ever ran one, and a component laid out without an
+          # __init__.py (arcaeon-ledger/adapter/ is exactly this) was skipped
+          # entirely — so its selftest, including a P0 fidelity check, has never
+          # been executed by CI. A discovery loop that silently finds nothing is
+          # the same "0 found / 0 looked at" shape as the exit-5 case above.
+          # Now: scan one level deep, run EVERY selftest found, report the count,
+          # and fail if ANY of them fails.
           root = pathlib.Path(".")
-          found = None
+          found = []
           for child in sorted(root.iterdir()):
               if not child.is_dir() or child.name.startswith((".", "_")):
                   continue
-              if (child / "selftest.py").exists() and (child / "__init__.py").exists():
-                  found = child.name
-                  break
+              if (child / "selftest.py").exists():
+                  found.append(child)
+              # one level deeper, for components that live beside the package
+              for sub in sorted(p for p in child.iterdir() if p.is_dir()) if child.is_dir() else []:
+                  if sub.name.startswith((".", "_")):
+                      continue
+                  if (sub / "selftest.py").exists():
+                      found.append(sub)
 
-          if found is None:
-              print("No <package>/selftest.py in this repo — skipping (not an error, 4 of 9 "
-                    "repos in this line don't ship one).")
+          if not found:
+              print("No <package>/selftest.py in this repo — skipping (not an error; "
+                    "several repos in this line don't ship one).")
               raise SystemExit(0)
 
-          print(f"Running selftest: python -m {found}.selftest")
-          result = subprocess.run([sys.executable, "-m", f"{found}.selftest"])
-          raise SystemExit(result.returncode)
+          print(f"Discovered {len(found)} selftest(s): {[str(f) for f in found]}")
+          failures = []
+          for pkg in found:
+              # importable as a module when there's an __init__.py; otherwise run
+              # the file directly rather than skipping it, which is what the old
+              # loop did.
+              if (pkg / "__init__.py").exists():
+                  cmd = [sys.executable, "-m", f"{str(pkg).replace('/', '.').replace(chr(92), '.')}.selftest"]
+              else:
+                  cmd = [sys.executable, str(pkg / "selftest.py")]
+              print(f"Running: {' '.join(cmd)}")
+              if subprocess.run(cmd).returncode != 0:
+                  failures.append(str(pkg))
+
+          if failures:
+              print(f"::error::selftest FAILED for: {failures}")
+              raise SystemExit(1)
+          print(f"All {len(found)} selftest(s) passed.")
+          raise SystemExit(0)
           PY
