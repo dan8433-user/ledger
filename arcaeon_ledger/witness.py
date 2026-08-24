@@ -17,7 +17,15 @@ This module ships two halves:
     breached there is nothing sensitive to steal, only hashes useless without the
     original log. A serverless HTTP endpoint (Stage 0 of the hosted service) is a
     thin wrapper over exactly this object; running it locally is a complete,
-    offline, zero-cost witness you fully control.
+    offline, zero-cost way to exercise this module. **Note the wording change
+    from line 6, caught in independent review 2026-08-24: a store you run
+    yourself is NOT the witness this module exists to provide** — line 6
+    defines a witness as a party OUTSIDE your own control, and a store you
+    alone hold is the opposite of that. Running it locally is for
+    development and testing the mechanism; the actual protection requires
+    deploying it somewhere the logging party cannot reach (see
+    `verify_against_witness`'s docstring below for exactly what a
+    self-controlled pin does and does not prove).
 
   * the client half — `publish_head` (send your current head to a witness) and
     `verify_against_witness` (fetch the last pin and check your log against it,
