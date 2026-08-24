@@ -452,3 +452,63 @@ def test_real_store_reports_witness_self_integrity_verified(tmp_path):
     v = verify_against_witness(store, "ns", Ledger(log))
     assert v.verdict == "consistent"
     assert v.witness_self_integrity == "verified"
+
+
+# ---------------------------------------------------------------------------
+# C2 (pre-invite adversarial audit, 2026-08-23): a pin taken over an EMPTY log
+# returns the library's one truthy verdict against ANY log, including a 96%
+# truncation.
+#
+# chain_at(path, 0) returns _GENESIS WITHOUT OPENING THE FILE, so the
+# comparison "genesis != genesis" is False and it falls through to "consistent".
+# witness.py already says in prose that "a pin recorded over an empty log
+# constrains nothing at all" -- and then the code blessed it. The
+# anti-truncation mechanism blessing a truncation.
+# ---------------------------------------------------------------------------
+
+def test_zero_row_pin_does_not_bless_an_unrelated_log(tmp_path):
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+
+    store = WitnessStore(tmp_path / "w.jsonl")
+    try:
+        publish_head(store, "ns", Ledger(empty))
+    except ValueError:
+        return  # refusing to mint the useless pin is the preferred fix
+
+    # If minting is allowed, the pin must still constrain nothing -- it must
+    # never read as a positive confirmation.
+    real = tmp_path / "real.jsonl"
+    led = Ledger(real)
+    for i in range(50):
+        led.append({"e": i})
+
+    v = verify_against_witness(store, "ns", Ledger(real))
+    assert v.verdict != "consistent", (
+        "a pin over an empty log positively confirmed an unrelated 50-row log"
+    )
+    assert not bool(v)
+
+
+def test_zero_row_pin_does_not_bless_a_truncated_log(tmp_path):
+    """The attack in its sharpest form: pin while empty, fill, truncate 50->2,
+    and the witness still says everything is fine."""
+    log = tmp_path / "audit.jsonl"
+    log.write_text("", encoding="utf-8")
+
+    store = WitnessStore(tmp_path / "w.jsonl")
+    try:
+        publish_head(store, "ns", Ledger(log))
+    except ValueError:
+        return
+
+    led = Ledger(log)
+    for i in range(50):
+        led.append({"e": i})
+    rows = log.read_text(encoding="utf-8").strip().split("\n")
+    log.write_text("\n".join(rows[:2]) + "\n", encoding="utf-8")  # 48 deleted
+
+    v = verify_against_witness(store, "ns", Ledger(log))
+    assert v.verdict != "consistent", (
+        "a zero-row pin blessed a log truncated from 50 rows to 2"
+    )

@@ -339,8 +339,23 @@ def publish_head(store: WitnessStore, namespace: str, ledger: Ledger,
     Call this on a cadence (the max gap between calls is your security parameter).
     `store` is any object with a `record(namespace, head, received_at=)` method —
     the reference `WitnessStore`, or a client wrapper that POSTs to a hosted one.
+
+    REFUSES A ZERO-ROW PIN (pre-invite audit 2026-08-23, C2). `chain_at(path, 0)`
+    returns the genesis constant WITHOUT OPENING THE FILE, so a pin taken over an
+    empty log compared "genesis" against "genesis", matched, and fell through to
+    the library's one truthy verdict — against ANY log, including one truncated
+    from 50 rows to 2. This module's own prose already said "a pin recorded over
+    an empty log constrains nothing at all"; the code then blessed it, which is
+    the anti-truncation mechanism certifying a truncation. A pin that constrains
+    nothing is not a weak pin, it is a misleading one, so it is not minted.
     """
-    return store.record(namespace, ledger.head(), received_at=received_at)
+    head = ledger.head()
+    if not head.rows:
+        raise ValueError(
+            "refusing to pin an empty log: a zero-row pin constrains nothing and "
+            "would read as a positive confirmation against any log. Append at "
+            "least one record before publishing a head.")
+    return store.record(namespace, head, received_at=received_at)
 
 
 def verify_against_witness(store: WitnessStore, namespace: str,
@@ -431,6 +446,20 @@ def verify_against_witness(store: WitnessStore, namespace: str,
     if not isinstance(w_rows, int):
         return _V("no_record", "witness pin missing a valid row count",
                               witness_chain=w_chain, local_rows=local_rows)
+
+    # A ZERO-ROW PIN CONSTRAINS NOTHING (pre-invite audit 2026-08-23, C2).
+    # publish_head now refuses to mint one, but pins minted before that fix — or
+    # by a remote store that does not refuse — must still never read as a
+    # positive confirmation. The comparison below would match "genesis" against
+    # "genesis" and return the one truthy verdict against ANY log, including one
+    # truncated to almost nothing. "The witness saw nothing" is a no_record, not
+    # a pass.
+    if w_rows == 0:
+        return _V("no_record",
+                  "the witness pin for namespace %r was taken over an EMPTY log "
+                  "(0 rows): it constrains nothing and cannot confirm this or any "
+                  "other log. Re-pin against a non-empty head." % namespace,
+                  witness_rows=0, witness_chain=w_chain, local_rows=local_rows)
 
     if local_rows < w_rows:
         return _V(
