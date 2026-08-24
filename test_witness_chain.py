@@ -593,3 +593,83 @@ def test_verify_against_witness_does_not_crash_on_pins_none(tmp_path):
 
     result = verify_against_witness(_BrokenClient(), "ns", Ledger(log))
     assert result.verdict in ("witness_broken", "no_record")
+
+
+def test_monotonic_guard_refuses_backward_pin(tmp_path):
+    """C3 (pre-invite audit 2026-08-23; re-demonstrated by independent review
+    2026-08-24): truncate the log, re-pin the smaller head, and the new pin
+    became latest() while the larger disproof sat unread in history() --
+    verify_against_witness then reported consistent over a truncation. The
+    hosted JS service has refused this since 8/14; the Python reference now
+    matches: record() compares against the namespace's HISTORY high-water
+    mark and raises on a backward head."""
+    import pytest
+    log = tmp_path / "log.jsonl"
+    lg = Ledger(log)
+    for i in range(5):
+        lg.append({"e": i})
+    store = WitnessStore(tmp_path / "w.jsonl")
+    publish_head(store, "ns", lg)  # pins 5 rows
+
+    # The attack: rebuild a valid 3-row log, try to pin the smaller head.
+    log2 = tmp_path / "log2.jsonl"
+    lg2 = Ledger(log2)
+    for i in range(3):
+        lg2.append({"e": i})
+    with pytest.raises(ValueError, match="monotonic violation"):
+        publish_head(store, "ns", lg2)
+
+    # The disproof pin is still the latest -- the attack left no trace as
+    # accepted state, and verification against the REAL log still passes.
+    assert store.latest("ns")["rows"] == 5
+    v = verify_against_witness(store, "ns", lg)
+    assert v.verdict == "consistent"
+
+
+def test_monotonic_guard_allows_equal_and_advancing_pins(tmp_path):
+    """Green control for C3: the guard must not break the two legitimate
+    shapes -- an idempotent equal-rows re-pin (the heartbeat case, same as
+    the JS service) and a normal advancing pin."""
+    log = tmp_path / "log.jsonl"
+    lg = Ledger(log)
+    for i in range(3):
+        lg.append({"e": i})
+    store = WitnessStore(tmp_path / "w.jsonl")
+    publish_head(store, "ns", lg)
+    publish_head(store, "ns", lg)          # equal re-pin: allowed
+    lg.append({"e": 3})
+    publish_head(store, "ns", lg)          # advancing pin: allowed
+    assert store.latest("ns")["rows"] == 4
+    assert len(store.history("ns")) == 3
+
+
+def test_monotonic_guard_uses_high_water_not_latest(tmp_path):
+    """The guard anchors to the history HIGH-WATER mark, not latest(): a
+    store file that already contains a backward pin (written before this
+    guard existed) must not let the low mark become the new bar."""
+    import pytest
+    store = WitnessStore(tmp_path / "w.jsonl")
+    log5 = tmp_path / "log5.jsonl"
+    lg5 = Ledger(log5)
+    for i in range(5):
+        lg5.append({"e": i})
+    publish_head(store, "legacy", lg5)     # high-water: 5
+
+    # Simulate a pre-guard backward pin already in the file: append a 2-row
+    # pin by writing through record() is now impossible, so plant it raw --
+    # exactly what a legacy file would contain.
+    import json as _json
+    raw = _json.loads(store.path.read_text(encoding="utf-8").strip().split("\n")[-1])
+    legacy = dict(raw)
+    legacy["rows"] = 2
+    with store.path.open("a", encoding="utf-8") as fh:
+        fh.write(_json.dumps(legacy) + "\n")
+    assert store.latest("legacy")["rows"] == 2  # latest is the LOW pin
+
+    # A 3-row pin clears latest() but NOT the high-water of 5: must refuse.
+    log3 = tmp_path / "log3.jsonl"
+    lg3 = Ledger(log3)
+    for i in range(3):
+        lg3.append({"e": i})
+    with pytest.raises(ValueError, match="high-water is 5"):
+        publish_head(store, "legacy", lg3)

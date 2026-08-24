@@ -163,7 +163,37 @@ class WitnessStore:
         The chain spans the WHOLE FILE, not one namespace. Per-namespace chaining would
         let an attacker delete every pin for one namespace and leave the rest verifying
         clean, which is the same detachment problem the ledger guards against.
+
+        MONOTONIC GUARD (C3, pre-invite audit 2026-08-23; independently
+        re-demonstrated in review 2026-08-24): a witness never goes backward.
+        Before this guard, truncate-the-log-then-re-pin sailed through — the
+        new, smaller pin became `latest()`, `verify_against_witness` read only
+        `latest()`, and the larger old pin (the standing disproof) sat unread
+        in `history()`. The hosted JS service has rejected this since 8/14
+        ("monotonic violation: a witness never goes backward", 409); the
+        Python reference now matches. The bar is the HISTORY HIGH-WATER MARK,
+        not `latest()`: a file that already contains a backward pin (written
+        before this guard existed) must not anchor the guard to the low mark.
+        Equal rows re-pin stays allowed (idempotent heartbeat, same as JS).
+        Honest limit, unchanged from the class docstring: this stops a
+        backward pin arriving through the API. It cannot stop an actor who
+        can rewrite the store file itself — that protection is, as ever, the
+        independence of the host.
         """
+        high_water = None
+        for prior in self.history(namespace):
+            r = prior.get("rows")
+            if isinstance(r, int) and not isinstance(r, bool) \
+                    and (high_water is None or r > high_water):
+                high_water = r
+        if high_water is not None and head.rows < high_water:
+            raise ValueError(
+                f"monotonic violation: a witness never goes backward — "
+                f"namespace {namespace!r} high-water is {high_water} rows, "
+                f"submitted {head.rows}. A shrinking log is exactly the "
+                f"truncation this witness exists to catch; if the log was "
+                f"legitimately reset, use a new namespace rather than "
+                f"rewriting this one's history.")
         rec = {
             "namespace": namespace,
             "rows": head.rows,
