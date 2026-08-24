@@ -1,4 +1,33 @@
-# Changelog
+# Changelog — arcaeon-adapter
+
+## 0.1.2 — 2026-08-24 (SECURITY: ship the redactor fix that was already in version control before 0.1.1 uploaded)
+
+The published 0.1.1 — itself a SECURITY release — leaked password-only URL
+credentials: its `_URL_USERINFO` pattern required a non-empty username, so
+`redis://:pass@host` and `mongodb://:pass@host` (the STANDARD shape for
+both) passed through the redactor verbatim into `session_begin`, in the
+default digest-only mode, in the file whose purpose is to be handed to an
+auditor. The fix (`*` quantifier, commit aaeafdf in the development repo)
+was committed roughly two hours BEFORE the 0.1.1 upload; the artifact was
+built from a commit three earlier. A provenance vendor shipped a release
+whose fix existed in its own history and not in its own bytes — found by
+an independent adversarial audit of the published wheels, disclosed here
+rather than smoothed over.
+
+This release ships current HEAD, which also includes the redactor rewrite
+0.1.1 was built before (f7492c5). 0.1.1 should be treated as leaking:
+upgrade, and if a wrapped command line ever carried a password-only URL
+under 0.1.0/0.1.1, rotate that credential — the seam log has it in
+cleartext.
+
+Known, disclosed, not fixed here (same audit): a hash chain cannot detect
+truncation of its own TAIL — a chopped-off end verifies green; reconcile
+`session_end.calls` vs the `tool_call` row count, check `seq` density, or
+pin the head to an external witness (the README's honest-limit section now
+needs this sentence; next release). The selftest's RED arms assert only
+output-differs, so a crashed fault-run could masquerade as a caught
+corruption (harness-only, not production-reachable).
+
 
 ## Unreleased
 
