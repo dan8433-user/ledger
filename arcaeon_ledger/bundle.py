@@ -144,13 +144,32 @@ def _readme_text(ledger_name: str, ledger_sha: str, verify_report: dict,
                         "hash chain holds end to end.")
     elif verify_report.get("prechain_adoption"):
         lr = verify_report["lenient_result"]
-        verdict_line = ("VERDICT: intact from adoption onward. This log was adopted over "
-                        "pre-existing history: the rows before the first chained row carry "
-                        "no chain and are not cryptographically verifiable (that is expected, "
-                        "not tampering). From the first chained row to the end, the hash "
-                        "chain holds — see lenient_result (ok=null, scope "
-                        f"'{lr.get('verified_scope')}'). Strict mode reports these pre-chain "
-                        "rows as breaks by design; that is not evidence of alteration.")
+        # HONESTY FIX (pre-invite audit 2026-08-23, C5). This branch used to end
+        # "that is not evidence of alteration" — resolving, in the log owner's
+        # favour, in the one file an auditor actually reads, a question this
+        # package's own docstring says CANNOT BE RESOLVED: "the verifier cannot
+        # tell real legacy history from a fabricated prepend." Strict-red plus
+        # lenient-null IS the fabricated-prepend signature; it is also the honest
+        # adopter's signature, and nothing in the bytes separates them. A critic
+        # only had to quote our docstring against our own README.txt.
+        # State the undecidability instead of denying it, and quote the counts so
+        # the reader can see how much of the file is unverifiable.
+        verdict_line = (
+            f"VERDICT: verified from adoption onward, over {lr.get('chained')} of "
+            f"{lr.get('rows')} row(s). This log was adopted over pre-existing history: "
+            f"{lr.get('prechain')} row(s) before the first chained row carry no chain and "
+            "are NOT cryptographically verifiable. From the first chained row to the end, "
+            f"the hash chain holds (lenient_result: ok=null, scope "
+            f"'{lr.get('verified_scope')}').\n\n"
+            "WHAT THIS DOES NOT SETTLE, stated plainly: unchained leading rows are the "
+            "expected shape of an honest adoption AND the exact shape of a fabricated "
+            "prepend. This package cannot tell those apart — nothing in the bytes "
+            "distinguishes real legacy history from history invented later and placed "
+            "before the first chained row. Strict mode counts those rows as breaks; that "
+            "is neither proof of tampering nor evidence against it. Treat the pre-chain "
+            "region as UNVERIFIED, not as vouched for. To close it, pin the head to an "
+            "external witness at adoption time: rows written from that point forward are "
+            "the ones this bundle can actually stand behind.")
     elif ok is False:
         verdict_line = ("VERDICT: BROKEN. Strict verification found "
                         f"{r.get('breaks')} break(s); first break: {r.get('first_break')}. "
@@ -295,8 +314,16 @@ def build_bundle(ledger_path: str | Path, *, out: str | Path | None = None,
     result = verify_file(src, strict=True)
     lenient = verify_file(src, strict=False)
     # strict-broken but lenient-clean-modulo-prechain = adoption, not tampering.
+    # `lenient.chained > 0` is load-bearing (pre-invite audit C5/F3). Without it a
+    # log with ZERO chained rows — every link stripped — took the adoption branch,
+    # and the bundle asserted "the hash chain holds" over a file with no verified
+    # links at all, while MANIFEST.json honestly carried verify.ok=false. The
+    # machine-readable field was right and the human-readable verdict, which is
+    # the artifact's whole purpose, was not. No first chained row means no
+    # adoption claim: fall through to BROKEN.
     prechain_only = (result.ok is False and lenient.ok is None
-                     and lenient.verified_scope == "bounded_prechain_skipped")
+                     and lenient.verified_scope == "bounded_prechain_skipped"
+                     and (lenient.chained or 0) > 0)
     verify_report = {
         "package": "arcaeon-ledger",
         "package_version": __version__,

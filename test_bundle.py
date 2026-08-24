@@ -264,3 +264,105 @@ def test_cli_usage_errors_exit_one(tmp_path, capsys):
     assert main(["a.jsonl", "--bogus"]) == 1
     assert main([str(tmp_path / "missing.jsonl")]) == 1
     assert main(["-h"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# C5 (pre-invite adversarial audit, 2026-08-23): the auditor-facing README
+# resolved an UNDECIDABLE question in the log owner's favour.
+#
+# Unchained leading rows are the expected shape of an honest adoption AND the
+# exact shape of a fabricated prepend. This package's own docstring says the
+# verifier "cannot tell real legacy history from a fabricated prepend" -- and
+# the bundle's README.txt said those rows are "not evidence of alteration",
+# while MANIFEST.json honestly carried verify.ok=false. Machine-readable said
+# red; the human-readable verdict, which is the artifact's entire purpose, said
+# fine. A critic only had to quote our docstring against our own README.
+# ---------------------------------------------------------------------------
+
+def _strip_chain(p: Path, keep_chained_from=None):
+    """Remove chain links. keep_chained_from=k leaves rows k.. chained."""
+    import re
+    rows = p.read_text(encoding="utf-8").strip().split("\n")
+    out = []
+    for i, r in enumerate(rows):
+        if keep_chained_from is not None and i >= keep_chained_from:
+            out.append(r)
+        else:
+            out.append(re.sub(r',\s*"chain":\s*"[0-9a-f]+"\s*\}$', "}", r))
+    p.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def _adopted_log(tmp_path, prechain=3, chained=4):
+    """A log shaped like a REAL adoption, built the way the README documents it:
+    pre-existing legacy rows that carry no chain, then chaining begins.
+
+    (First draft of this helper stripped chains from an already-chained log,
+    which leaves the surviving rows pointing at a predecessor that no longer
+    has a chain — that is a BROKEN log, not an adopted one, and lenient verify
+    correctly returned ok=False. The test failing on it was the test working.)"""
+    p = tmp_path / "adopted.jsonl"
+    legacy = [json.dumps({"e": f"legacy{i}"}) for i in range(prechain)]
+    p.write_text("\n".join(legacy) + "\n", encoding="utf-8")
+    lg = Ledger(p)
+    for i in range(chained):
+        lg.append({"e": i})
+    return p
+
+
+def test_adoption_verdict_states_the_undecidability_instead_of_denying_it(tmp_path):
+    src = _adopted_log(tmp_path)
+    res = build_bundle(src, out=tmp_path / "b")
+    out = res.out_path
+    readme = (out / "README.txt").read_text(encoding="utf-8")
+
+    assert "not evidence of alteration" not in readme, (
+        "the bundle must not tell an auditor a fabricated prepend is not "
+        "evidence of alteration — our own docstring says it is undecidable"
+    )
+    assert "fabricated prepend" in readme
+    assert "cannot tell those apart" in readme
+    assert "UNVERIFIED" in readme
+
+
+def test_adoption_verdict_quotes_how_much_is_unverifiable(tmp_path):
+    """A reader must be able to see the size of the unverifiable region."""
+    src = _adopted_log(tmp_path, prechain=3, chained=4)
+    res = build_bundle(src, out=tmp_path / "b")
+    out = res.out_path
+    readme = (out / "README.txt").read_text(encoding="utf-8")
+    assert "4 of 7" in readme, readme[:400]
+    assert "3 row(s) before the first chained row" in readme
+
+
+def test_a_fully_unchained_log_is_never_called_adopted(tmp_path):
+    """THE FLOOR: with zero chained rows there is no 'first chained row', so the
+    bundle must not claim a chain holds. It used to take the adoption branch and
+    assert exactly that over a file with no verified links at all."""
+    p = tmp_path / "all_prechain.jsonl"
+    lg = Ledger(p)
+    for i in range(5):
+        lg.append({"e": i})
+    _strip_chain(p)                      # every link gone
+
+    res = build_bundle(p, out=tmp_path / "b")
+    out = res.out_path
+    report = json.loads((out / "verify_report.json").read_text(encoding="utf-8"))
+    assert report["prechain_adoption"] is False, (
+        "a 100% unchained log took the adoption branch"
+    )
+    readme = (out / "README.txt").read_text(encoding="utf-8")
+    assert "BROKEN" in readme
+    assert "verified from adoption onward" not in readme
+
+
+def test_a_genuinely_intact_log_still_reads_intact(tmp_path):
+    """Green control: the honest case must not inherit any of the new hedging."""
+    p = tmp_path / "clean.jsonl"
+    lg = Ledger(p)
+    for i in range(4):
+        lg.append({"e": i})
+    res = build_bundle(p, out=tmp_path / "b")
+    out = res.out_path
+    readme = (out / "README.txt").read_text(encoding="utf-8")
+    assert "VERDICT: intact." in readme
+    assert "fabricated prepend" not in readme
