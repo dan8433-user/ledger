@@ -195,6 +195,24 @@ def case_passthrough_fidelity(d: Path) -> bytes:
     for mode in ("reserialize", "drop_byte"):
         mutated = _run_proxied(d / f"seam.{mode}.jsonl", fault=mode)
         _noop_guard(f"fidelity/{mode}", direct, mutated)
+        # A DEAD PROXY IS NOT A CAUGHT CORRUPTION (pre-invite adversarial audit,
+        # 2026-08-23). `mutated != direct` alone is satisfied trivially by a run
+        # that produced NOTHING: make the fault injector raise and this arm
+        # printed "RED on reserialize: corruption detected (length 2001202 vs 0)"
+        # while no corruption was ever injected. The check that exists to prove
+        # the comparison is not decoration was itself decoration in the failure
+        # direction. The GREEN arm above already guards against a vacuous
+        # comparison (the >1MB control floor); the RED arm had no equivalent.
+        #
+        # A byte-level mutation of a stream perturbs it, it does not delete it.
+        # So the mutated run must still have STREAMED — comparable volume —
+        # while differing in bytes. Anything far short of the control means the
+        # proxy died and this case proved nothing.
+        _require(len(mutated) > len(direct) * 0.9,
+                 f"fault run {mode!r} produced {len(mutated)} bytes against a "
+                 f"{len(direct)}-byte control — the proxy did not stream, so the "
+                 f"difference is a DEAD PROCESS, not detected corruption. This "
+                 f"case proves nothing until the fault actually runs.")
         _require(mutated != direct,
                  f"fidelity check stayed GREEN on injected corruption {mode!r} — "
                  f"the comparison is decoration")

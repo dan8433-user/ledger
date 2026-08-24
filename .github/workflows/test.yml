@@ -153,15 +153,20 @@ jobs:
           print(f"Discovered {len(found)} selftest(s): {[str(f) for f in found]}")
           failures = []
           for pkg in found:
-              # importable as a module when there's an __init__.py; otherwise run
-              # the file directly rather than skipping it, which is what the old
-              # loop did.
+              # Run as a MODULE from the package's PARENT directory. Building a
+              # dotted path from the repo root instead (adapter.arcaeon_adapter)
+              # is wrong whenever the intermediate directory is not itself a
+              # package — which is exactly the case for the component this
+              # discovery was widened to find. These selftests use relative
+              # imports, so running the file directly fails too.
+              parent = pkg.parent if str(pkg.parent) != "" else root
               if (pkg / "__init__.py").exists():
-                  cmd = [sys.executable, "-m", f"{str(pkg).replace('/', '.').replace(chr(92), '.')}.selftest"]
+                  cmd = [sys.executable, "-m", f"{pkg.name}.selftest"]
               else:
-                  cmd = [sys.executable, str(pkg / "selftest.py")]
-              print(f"Running: {' '.join(cmd)}")
-              if subprocess.run(cmd).returncode != 0:
+                  cmd = [sys.executable, "selftest.py"]
+                  parent = pkg
+              print(f"Running: {' '.join(cmd)}  (cwd={parent})")
+              if subprocess.run(cmd, cwd=str(parent)).returncode != 0:
                   failures.append(str(pkg))
 
           if failures:
