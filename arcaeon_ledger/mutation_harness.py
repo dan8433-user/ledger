@@ -523,9 +523,31 @@ def _finding_subject_absent() -> str | None:
     return None
 
 
+# The harness's own floor. Below this many cases, an aggregate "all behaved"
+# line is not a result — it is the empty set wearing a verdict's clothes.
+# Raise it when cases are added; never lower it to make a run pass.
+MIN_CASES = 16
+
+
 def run() -> int:
     failures = 0
     print("== mutation harness (every claimed check, observed failing) ==")
+
+    # THE HARNESS MUST BE ABLE TO FAIL (pre-invite audit 2026-08-23, C13).
+    # This is the product's proof-of-proof and the buyer-facing command, and it
+    # could not fail: with CASES = [] it printed "ALL 0 CASES BEHAVED — every
+    # check was observed catching its own defect" and exited 0. Cutting sixteen
+    # cases to two also exited 0, and test_mutation_harness.py stayed green
+    # because it iterates CASES itself — green by construction. "0 found" and
+    # "0 looked at" printed identically, and the line explicitly CLAIMED
+    # observation. A count floor is the whole fix.
+    if len(CASES) < MIN_CASES:
+        print(f"\nHARNESS REFUSED — {len(CASES)} case(s) registered, floor is "
+              f"{MIN_CASES}. An aggregate verdict over a shrunken case list is "
+              "not evidence: the cases are the instrument, and an instrument "
+              "that lost its cases reports silence as health. Restore the "
+              "cases, or lower MIN_CASES deliberately and say why.")
+        return 2
     for name, fn in CASES:
         try:
             detail = fn()

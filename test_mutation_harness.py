@@ -124,3 +124,59 @@ if __name__ == "__main__":
     test_harness_goes_red_when_a_verifier_is_decoration()
     test_noop_guard_raises()
     print("\nALL PASS — the harness catches defects, and is itself catchable.")
+
+
+# ---------------------------------------------------------------------------
+# C13 (pre-invite adversarial audit, 2026-08-23): the harness could not fail.
+#
+# This module is the product's PROOF-OF-PROOF and the buyer-facing command.
+# With CASES = [] it printed "ALL 0 CASES BEHAVED - every check was observed
+# catching its own defect" and exited 0. Cutting sixteen cases to two also
+# exited 0. The existing tests could not catch it because they iterate CASES
+# themselves and assert each registered name appears in the output -- green by
+# construction, which is the exact defect class this whole file exists to hunt.
+#
+# "0 found" and "0 looked at" printed identically, and the line explicitly
+# claimed observation.
+# ---------------------------------------------------------------------------
+import contextlib
+import io
+
+import arcaeon_ledger.mutation_harness as _mh
+
+
+def _run_capture(cases):
+    original = _mh.CASES
+    try:
+        _mh.CASES = cases
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = _mh.run()
+        return rc, buf.getvalue()
+    finally:
+        _mh.CASES = original
+
+
+def test_harness_refuses_an_empty_case_list():
+    rc, out = _run_capture([])
+    assert rc != 0, "an empty case list still reported success"
+    assert "ALL 0 CASES BEHAVED" not in out
+    assert "REFUSED" in out
+
+
+def test_harness_refuses_a_shrunken_case_list():
+    """Deleting most cases must not silently shrink the proof."""
+    rc, out = _run_capture(list(_mh.CASES)[:2])
+    assert rc != 0, "a 2-case run reported the same success as a full run"
+    assert "REFUSED" in out
+
+
+def test_the_real_run_still_passes_and_meets_its_own_floor():
+    """The green control. Without it the floor could be set above the real case
+    count and every run would 'refuse', which is a different way to be useless."""
+    assert len(_mh.CASES) >= _mh.MIN_CASES, (
+        f"{len(_mh.CASES)} cases registered, floor is {_mh.MIN_CASES}"
+    )
+    rc, out = _run_capture(list(_mh.CASES))
+    assert rc == 0, out
+    assert f"ALL {len(_mh.CASES)} CASES BEHAVED" in out
