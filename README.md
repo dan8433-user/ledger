@@ -305,7 +305,22 @@ publish_head(witness, "billing-agent", log)    # record the current head — do 
 v = verify_against_witness(witness, "billing-agent", log)
 v.verdict     # "consistent" | "truncated" | "rewritten" | "no_record"
 bool(v)       # truthy ONLY on "consistent" — a missing pin is no_record, never a false ok
+
+# READ THE VERDICT WITH ITS QUALIFIERS, never the bare string alone:
+v.witness_self_integrity   # "verified" | "unestablished" | "broken"
 ```
+
+**A bare `"consistent"` is not the whole answer.** The verdict also carries
+`witness_self_integrity`: whether the witness store could prove its *own* pin
+chain intact. A hosted client that only exposes `latest()` cannot self-verify,
+so its verdicts read `unestablished` — the comparison ran honestly, but a
+forged pin *served by that store* would compare clean. `verified` means the
+store's own chain was recomputed; `broken` means it failed. A consumer that
+branches on `v.verdict == "consistent"` without reading
+`witness_self_integrity` is trusting the store's honesty exactly as much as it
+would trust the log's — which is the arrangement a witness exists to replace.
+(Found in the 2026-08-23 pre-invite audit, C14; the field exists so "not
+checked" can never render as "checked and fine.")
 
 `WitnessStore` is the reference witness: one append-only JSONL file of pins. A
 hosted witness is a thin HTTP wrapper over exactly this object; run it locally
