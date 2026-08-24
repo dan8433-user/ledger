@@ -512,3 +512,84 @@ def test_zero_row_pin_does_not_bless_a_truncated_log(tmp_path):
     assert v.verdict != "consistent", (
         "a zero-row pin blessed a log truncated from 50 rows to 2"
     )
+
+
+# ---------------------------------------------------------------------------
+# C11 (pre-invite adversarial audit, 2026-08-23): latest()/history() crash on a
+# non-UTF8 byte in the pin file instead of producing a verdict. verify() (this
+# same file) already tolerates it with errors="replace"; these two never
+# inherited the fix. This contradicts the module's own stated principle that a
+# damaged log is the one you most need to export -- it hardened the log path
+# and left the witness path fatal.
+# ---------------------------------------------------------------------------
+
+def test_latest_tolerates_a_non_utf8_byte_in_the_pin_file(tmp_path):
+    log = tmp_path / "a.jsonl"
+    lg = Ledger(log)
+    for i in range(3):
+        lg.append({"e": i})
+    store = WitnessStore(tmp_path / "w.jsonl")
+    publish_head(store, "ns", Ledger(log))
+
+    # append one non-UTF8 byte to the pin file, the way a truncated write or a
+    # corrupted disk sector would
+    with open(store.path, "ab") as fh:
+        fh.write(b"\xff\xfe")
+
+    # must not raise
+    result = store.latest("ns")
+    assert result is not None, "a trailing garbage byte lost a recoverable pin"
+
+
+def test_history_tolerates_a_non_utf8_byte_in_the_pin_file(tmp_path):
+    log = tmp_path / "a.jsonl"
+    lg = Ledger(log)
+    for i in range(2):
+        lg.append({"e": i})
+    store = WitnessStore(tmp_path / "w.jsonl")
+    publish_head(store, "ns", Ledger(log))
+
+    with open(store.path, "ab") as fh:
+        fh.write(b"\xff\xfe")
+
+    result = store.history("ns")
+    assert len(result) == 1, "a trailing garbage byte lost recoverable history"
+
+
+def test_export_bundle_does_not_crash_on_a_corrupted_witness_file(tmp_path):
+    """The end-to-end case: export must produce a verdict, not a traceback, over
+    a damaged witness -- exactly the principle this fix restores."""
+    from arcaeon_audit import export_bundle
+    import json as _json
+
+    log = tmp_path / "a.jsonl"
+    lg = Ledger(log)
+    for i in range(3):
+        lg.append({"e": i})
+    store = WitnessStore(tmp_path / "w.jsonl")
+    publish_head(store, "ns", Ledger(log))
+    with open(store.path, "ab") as fh:
+        fh.write(b"\xff\xfe")
+
+    out = tmp_path / "bundle"
+    export_bundle(str(log), str(out), witness=str(store.path), witness_namespace="ns")
+    integ = _json.loads((out / "integrity.json").read_text(encoding="utf-8"))
+    assert "verdict" in integ  # produced SOMETHING, did not crash
+
+
+def test_verify_against_witness_does_not_crash_on_pins_none(tmp_path):
+    """A remote client returning {"ok": False, "pins": None} (key present,
+    value None, not absent) must not raise -- wv.get("pins", 0) only
+    substitutes for a MISSING key."""
+    log = tmp_path / "a.jsonl"
+    lg = Ledger(log)
+    lg.append({"e": 0})
+
+    class _BrokenClient:
+        def verify(self):
+            return {"ok": False, "pins": None}
+        def latest(self, ns):
+            return None
+
+    result = verify_against_witness(_BrokenClient(), "ns", Ledger(log))
+    assert result.verdict in ("witness_broken", "no_record")

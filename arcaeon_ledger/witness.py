@@ -297,9 +297,17 @@ class WitnessStore:
 
     def latest(self, namespace: str) -> dict | None:
         """The most recently recorded pin for `namespace`, or None."""
+        # errors="replace" (pre-invite audit C11, 2026-08-23): verify() in this
+        # same file already tolerates a non-UTF8 byte; this read path did not,
+        # so a truncated write or a corrupted sector raised UnicodeDecodeError
+        # straight through export_bundle instead of producing a verdict. The
+        # module's own principle is that a damaged log is the one you most need
+        # to export -- this hardened the log path and left the witness path
+        # fatal. A replaced byte breaks that ONE JSON line's parse (caught below
+        # by the existing ValueError guard); every other line is unaffected.
         found = None
         try:
-            for raw in self.path.read_text(encoding="utf-8").splitlines():
+            for raw in self.path.read_text(encoding="utf-8", errors="replace").splitlines():
                 raw = raw.strip()
                 if not raw:
                     continue
@@ -317,7 +325,7 @@ class WitnessStore:
         """All pins recorded for `namespace`, in order."""
         out: list[dict] = []
         try:
-            for raw in self.path.read_text(encoding="utf-8").splitlines():
+            for raw in self.path.read_text(encoding="utf-8", errors="replace").splitlines():
                 raw = raw.strip()
                 if not raw:
                     continue
@@ -413,7 +421,12 @@ def verify_against_witness(store: WitnessStore, namespace: str,
         kw.setdefault("witness_self_integrity", _si)
         return WitnessVerdict(*a, **kw)
 
-    if wv.get("ok") is False and wv.get("pins", 0) > 0:
+    # `wv.get("pins", 0)` only substitutes 0 when the KEY IS ABSENT. A remote
+    # witness client returning `{"ok": False, "pins": None}` explicitly still
+    # raised TypeError on `None > 0` (pre-invite audit C11, found alongside the
+    # non-UTF8 crash above — same discipline: this function must return a
+    # verdict about EVERY input, including a hostile or malformed one).
+    if wv.get("ok") is False and (wv.get("pins") or 0) > 0:
         # pins > 0 is the difference between a TAMPERED witness and an ABSENT one.
         # A missing or empty file reads as ok=False/unreadable but holds no pins, and
         # that is a legitimate no-pin state that falls through to "no_record" below —
