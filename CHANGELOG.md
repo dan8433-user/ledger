@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased (staged for 0.5.10) — a witness never goes backward, and the docs stop contradicting themselves
+
+- **C3 monotonic guard.** `WitnessStore.record()` now refuses a pin whose
+  `rows` is below the namespace's history high-water mark, with the same
+  semantics the hosted JS service has enforced since 8/14 ("a witness never
+  goes backward"). Before this, truncate-then-re-pin sailed through the
+  Python reference: the smaller pin became `latest()`, `verify_against_witness`
+  read only `latest()`, and the larger old pin — the standing disproof — sat
+  unread in `history()`. The bar is the HIGH-WATER mark, not `latest()`, so
+  a legacy file already containing a backward pin cannot anchor the guard to
+  the low mark. Equal-rows re-pin (the heartbeat) stays allowed. Honest
+  limit, unchanged: this stops a backward pin arriving through the API; an
+  actor who can rewrite the store file itself is outside it — that
+  protection remains the independence of the host. Mutation-verified.
+- **Docstring self-contradiction fixed** (found by independent review
+  2026-08-24): the module header called a locally-run store "a witness you
+  fully control" — the exact opposite of the module's own opening
+  definition (a witness is a party OUTSIDE your control), and the exact
+  overclaim phrase the 2026-08-23 audit flagged. Local is for development;
+  the protection requires a host the logging party cannot reach.
+- **README: read the verdict with its qualifiers.** `witness_self_integrity`
+  existed in code since 0.5.9 but no consumer-facing doc said to read it. The
+  verify example now shows it and states plainly that a bare `"consistent"`
+  from a latest-only hosted client is `unestablished`, not `verified`.
+
 ## 0.5.9 — the witness store now has a chain of its own
 
 0.5.8 retracted a false claim: the witness store said it was "tamper-evident by
