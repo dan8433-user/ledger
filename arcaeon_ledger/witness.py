@@ -54,12 +54,28 @@ class WitnessVerdict:
       "rewritten"   — the log has enough rows but its chain at the witnessed row
                        DIFFERS from the pin: history was rewritten from some point.
       "no_record"   — the witness holds no pin for this namespace to check against.
+      "witness_broken" — the witness pin file fails its OWN chain: a pin from a
+                       tampered witness cannot be trusted, so no comparison is run.
+      "local_broken"   — the log fails its own chain; agreement at the pinned row
+                       does not make a locally tampered log consistent.
+    (The docstring listed only the first four while the code returned six —
+    a consumer switching on the documented set silently mishandled a tampered
+    witness. Pre-invite audit, 2026-08-23.)
+
+    witness_self_integrity: whether the WITNESS could vouch for itself.
+      "verified"      — the store self-verified its own pin chain.
+      "unestablished" — the store exposes no verify() (every hosted/remote
+                       client is this shape), so its self-integrity was never
+                       checked. The comparison still runs, but a caller must not
+                       read the result as a witness-backed guarantee.
+      "broken"        — the store self-verified and FAILED.
     """
     verdict: str
     detail: str
     witness_rows: int | None = None
     witness_chain: str | None = None
     local_rows: int | None = None
+    witness_self_integrity: str = "unknown"
 
     def __bool__(self) -> bool:
         # truthy only when the outside check positively confirms consistency
@@ -364,12 +380,30 @@ def verify_against_witness(store: WitnessStore, namespace: str,
     wv = _verify() if callable(_verify) else {"ok": None, "pins": None,
                                               "note": "store exposes no verify(); "
                                                       "self-integrity unestablished"}
+    # Self-integrity of the WITNESS ITSELF, carried on every verdict below so a
+    # caller can never mistake "not checked" for "checked and fine". A hosted
+    # client exposing only .latest() is the deployment shape, and before this it
+    # produced a verdict indistinguishable from one backed by a self-verified
+    # witness (pre-invite audit 2026-08-23, C14).
+    if not callable(_verify):
+        _si = "unestablished"
+    elif wv.get("ok") is True:
+        _si = "verified"
+    elif wv.get("ok") is False:
+        _si = "broken"
+    else:
+        _si = "unestablished"
+
+    def _V(*a, **kw):
+        kw.setdefault("witness_self_integrity", _si)
+        return WitnessVerdict(*a, **kw)
+
     if wv.get("ok") is False and wv.get("pins", 0) > 0:
         # pins > 0 is the difference between a TAMPERED witness and an ABSENT one.
         # A missing or empty file reads as ok=False/unreadable but holds no pins, and
         # that is a legitimate no-pin state that falls through to "no_record" below —
         # not a break. Only a genuine chain break AMONG real pins blocks here.
-        return WitnessVerdict(
+        return _V(
             "witness_broken",
             "the witness pin file fails its own chain (%s): a pin from a tampered "
             "witness cannot be trusted, so no comparison is meaningful"
@@ -379,14 +413,14 @@ def verify_against_witness(store: WitnessStore, namespace: str,
     # whose own chain is already broken elsewhere.
     lv = ledger.verify()
     if lv.ok is False:
-        return WitnessVerdict(
+        return _V(
             "local_broken",
             "the log fails its own chain (%s): witness agreement at the pinned row "
             "does not make a locally tampered log consistent" % lv.first_break)
 
     pin = store.latest(namespace)
     if pin is None:
-        return WitnessVerdict("no_record",
+        return _V("no_record",
                               f"witness holds no pin for namespace {namespace!r}")
 
     w_rows = pin.get("rows")
@@ -395,11 +429,11 @@ def verify_against_witness(store: WitnessStore, namespace: str,
     local_rows = local.rows
 
     if not isinstance(w_rows, int):
-        return WitnessVerdict("no_record", "witness pin missing a valid row count",
+        return _V("no_record", "witness pin missing a valid row count",
                               witness_chain=w_chain, local_rows=local_rows)
 
     if local_rows < w_rows:
-        return WitnessVerdict(
+        return _V(
             "truncated",
             f"log has {local_rows} rows but the witness recorded {w_rows}: "
             f"{w_rows - local_rows} witnessed row(s) are missing (truncation)",
@@ -407,13 +441,13 @@ def verify_against_witness(store: WitnessStore, namespace: str,
 
     local_chain_at = chain_at(ledger.path, w_rows)
     if local_chain_at is None:
-        return WitnessVerdict(
+        return _V(
             "truncated",
             f"cannot reach row {w_rows} in the log to compare against the witness",
             witness_rows=w_rows, witness_chain=w_chain, local_rows=local_rows)
 
     if local_chain_at != w_chain:
-        return WitnessVerdict(
+        return _V(
             "rewritten",
             f"log's chain at the witnessed row {w_rows} differs from the pin: "
             f"history was rewritten from at or before that point",
@@ -423,5 +457,5 @@ def verify_against_witness(store: WitnessStore, namespace: str,
     detail = "log matches the witness at the witnessed row"
     if grew:
         detail += f" and has grown {grew} row(s) since (expected)"
-    return WitnessVerdict("consistent", detail,
+    return _V("consistent", detail,
                           witness_rows=w_rows, witness_chain=w_chain, local_rows=local_rows)

@@ -21,7 +21,9 @@ witness that screams tamper at its own history turns every real pin into a false
 import json
 
 from arcaeon_ledger import Ledger
-from arcaeon_ledger.witness import WitnessStore
+from arcaeon_ledger.witness import (
+    WitnessStore, publish_head, verify_against_witness,
+)
 
 
 def _pins(tmp_path, n=3, ns="ns"):
@@ -362,3 +364,91 @@ def test_deleting_self_from_a_middle_pin_is_also_caught(tmp_path):
     lines[1] = json.dumps(rec)
     _write(store, lines)
     assert store.verify()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# C14 (pre-invite adversarial audit, 2026-08-23): a REMOTE witness client
+# bypasses the witness-integrity guard entirely.
+#
+# `verify_against_witness` calls `getattr(store, "verify", None)` and, when the
+# store exposes no verify(), proceeds with {"ok": None}. That contract
+# compatibility is DELIBERATE and correct — requiring verify() unconditionally
+# broke every hosted client the moment the method appeared. The defect is that
+# the resulting verdict looked identical to one backed by a fully self-verified
+# witness, so a forged pin delivered through a `.latest()`-only client could
+# mint a clean "consistent" with nothing in the verdict saying the witness's own
+# integrity was never established. The hosted witness IS that shape: it is the
+# deployment, so the defence was bypassed exactly where it is most needed.
+#
+# The fix is NOT to hard-fail (that reintroduces the original bug). It is to
+# make the unestablished state visible on the verdict, so a consumer cannot
+# mistake "not checked" for "checked and fine".
+# ---------------------------------------------------------------------------
+
+class _LatestOnlyClient:
+    """A hosted-witness client, exactly as the documented contract allows:
+    it exposes .latest(namespace) and nothing else."""
+
+    def __init__(self, pin):
+        self._pin = pin
+
+    def latest(self, namespace):
+        return dict(self._pin)
+
+
+def test_latest_only_client_marks_witness_self_integrity_unestablished(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    led = Ledger(log)
+    for i in range(5):
+        led.append({"e": i})
+    head = led.head()
+
+    # An honest pin, delivered by a client that cannot self-verify.
+    client = _LatestOnlyClient({"namespace": "ns", "rows": head.rows,
+                                "chain": head.chain})
+    v = verify_against_witness(client, "ns", Ledger(log))
+
+    assert v.verdict == "consistent"
+    assert v.witness_self_integrity == "unestablished", (
+        "a witness that cannot self-verify must say so on the verdict; "
+        "otherwise a PASS silently rests on an unverified witness"
+    )
+
+
+def test_forged_pin_through_latest_only_client_is_not_silently_clean(tmp_path):
+    """The attack: delete records, forge the pin to match. The comparison
+    agrees — that is the point of forging it — so the ONLY thing standing
+    between this and a clean PASS is the caller being told the witness was
+    never verified."""
+    log = tmp_path / "audit.jsonl"
+    led = Ledger(log)
+    for i in range(5):
+        led.append({"e": i})
+
+    rows = log.read_text(encoding="utf-8").strip().split("\n")
+    log.write_text("\n".join(rows[:3]) + "\n", encoding="utf-8")  # 2 deleted
+    forged = Ledger(log).head()                                   # re-pin to match
+
+    client = _LatestOnlyClient({"namespace": "ns", "rows": forged.rows,
+                                "chain": forged.chain})
+    v = verify_against_witness(client, "ns", Ledger(log))
+
+    assert v.witness_self_integrity == "unestablished", (
+        "forged pin through a hosted-shaped client reported "
+        f"witness_self_integrity={v.witness_self_integrity!r}"
+    )
+
+
+def test_real_store_reports_witness_self_integrity_verified(tmp_path):
+    """The green control: a real WitnessStore CAN self-verify, so the same
+    field must positively read 'verified' — otherwise the flag is useless."""
+    log = tmp_path / "audit.jsonl"
+    led = Ledger(log)
+    for i in range(4):
+        led.append({"e": i})
+    store = WitnessStore(tmp_path / "w.jsonl")
+    publish_head(store, "ns", Ledger(log))
+
+    v = verify_against_witness(store, "ns", Ledger(log))
+    assert v.verdict == "consistent"
+    assert v.witness_self_integrity == "verified"
