@@ -40,6 +40,19 @@ about the boundary is the point:
     any unchained row as a break. (Inserting an unchained row AFTER the chain
     begins is already flagged in every mode.)
 
+A BREAK, ONCE MADE, IS PERMANENT — and `declare_break` (0.6.0) is the only
+sanctioned repair. A log written out of band is broken forever and that is
+correct; recomputing the chain so the file goes green again is forging it. So
+instead you APPEND a row naming the break: which line, the orphan's exact bytes
+pinned by sha256, a human reason, a date, and the chain the record resumed from.
+`verify()` then stops calling it an unexplained break — and stops short of
+calling it verified: `ok` becomes None with `verified_scope`
+"bounded_declared_break", the break stays listed in `declared` forever, and
+`strict=True` ignores declarations entirely. Its honest limit, stated in its own
+docstring rather than buried: anyone who can write the file can write a
+declaration, so it raises NO bar against an attacker with write access. It
+defends against FORGETTING, not against tampering.
+
 TWO WRITE-SIDE BOUNDARIES, named because a cross-language verifier will meet them
 (audited 2026-08-14; both are on the writer, neither weakens `verify()` here):
   - Rows are serialized with Python's json.dumps. If you put float('nan') or
@@ -63,7 +76,7 @@ import json
 import os
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -77,8 +90,9 @@ try:                      # Windows byte-range locks
 except ImportError:       # pragma: no cover - platform dependent
     _msvcrt = None
 
-__version__ = "0.5.9"
+__version__ = "0.6.0"
 __all__ = ["LedgerWriteError", "Ledger", "VerifyResult", "verify_file", "chain_at", "authority", "Head",
+           "declare_break",
            "bind_artefact", "verify_artefact", "digest_bytes", "digest_json",
            "WitnessStore", "publish_head", "verify_against_witness", "WitnessVerdict"]
 
@@ -249,10 +263,11 @@ class VerifyResult:
     # Three-valued since 0.5.7 (the continuity-0.2.0 idiom: never mint a bare
     # green whose scope lives in a sibling field the reader isn't forced through):
     #   True  — every row was verified. Full green.
-    #   None  — no break found, BUT unchained prechain rows were skipped
-    #           unverified (non-strict mode). "Verified within scope" is not
-    #           "verified"; the old ok=True here let a fabricated legacy prepend
-    #           ride a green the consumer's `if r.ok:` never questioned.
+    #   None  — no break found, BUT the scan was bounded: unchained prechain rows
+    #           were skipped unverified, and/or a break was excused by a
+    #           declaration (0.6.0). "Verified within scope" is not "verified";
+    #           the old ok=True here let a fabricated legacy prepend ride a green
+    #           the consumer's `if r.ok:` never questioned.
     #   False — a break was found.
     # A consumer that reads only `ok` now gets null/falsy on the bounded case —
     # fail-safe — instead of a false green. The scope rides in-band in
@@ -274,7 +289,22 @@ class VerifyResult:
     #                              rows unverified; the verdict covers only the
     #                              chained region. Set on failures too: a red over
     #                              a bounded scan is still a bounded scan.
+    # "bounded_declared_break"   — no UNDECLARED break, but one or more breaks
+    #                              were excused by a `chain_break_declared` row
+    #                              (see `declare_break`). Non-strict only.
+    # "bounded_prechain_skipped+declared_break" — both of the above at once.
     verified_scope: str = "full"
+    # Breaks excused by a declaration (0.6.0). Counted SEPARATELY from `breaks`
+    # and never folded into it: a declared break is still a break in the record,
+    # it is just one that was named, dated, reasoned and pinned to exact bytes
+    # instead of left unexplained. It stays here permanently — there is no mode
+    # in which declaring a break makes it disappear from the verdict.
+    declared_breaks: int = 0
+    #: One human-readable line per excused break, e.g.
+    #: "line 25: declared break (hand-appended during an incident)". Present on
+    #: every result that excused anything, so a reader who prints the result
+    #: cannot miss that the file has a known hole in its chain.
+    declared: list[str] = field(default_factory=list)
 
     def __bool__(self) -> bool:  # `if log.verify(): ...`
         # Truthy ONLY on the full green. A bounded (ok=None) verification is
@@ -530,6 +560,145 @@ def chain_at(path: str | Path, n: int) -> str | None:
     return None
 
 
+_DECLARE_OP = "chain_break_declared"
+
+
+def declare_break(path: str | Path, orphan_line: int, why: str,
+                  *, resume_prev: str | None = None,
+                  authority: dict | None = None) -> dict:
+    """Name a chain break instead of hiding it, and pin it to exact bytes.
+
+    A chained ledger that has been written out of band is broken forever, and
+    that is correct: the break is the true record. The wrong repair is to
+    recompute the chain so the file verifies again, because a chain you can
+    silently re-forge is not evidence of anything. This is the right repair. It
+    APPENDS (never edits) a row saying: this line, these exact bytes, this
+    reason, this date, and the chain the record resumed from.
+
+    The break stays a break. `verify()` still reports it, permanently, in
+    `declared` / `declared_breaks`, and the verdict stays BOUNDED -- `ok` becomes
+    None with `verified_scope` naming the declaration, never True. What changes
+    is that a KNOWN, explained break stops masquerading as an unexplained one,
+    and the orphan content is pinned: edit those bytes afterwards and the sha
+    stops matching and the ledger goes red again.
+
+    INSTRUMENT DEFECTS -- what this does NOT prove, stated first, because
+    understating a tool's limits in its own docstring is the exact failure this
+    package exists to argue against:
+
+      - IT IS A RECORD DEVICE, NOT A CRYPTOGRAPHIC ONE. Anyone who can write the
+        file can write a declaration, so it raises NO bar against an attacker who
+        already has write access. It defends against FORGETTING, not against
+        tampering. Everything below is one more face of this single fact.
+      - It cannot tell an honest out-of-band append from a malicious one. `why`
+        is an unverified human claim; nothing checks it, and nothing can.
+      - It only declares breaks `verify()` ALREADY FOUND. It does nothing about a
+        break nobody noticed, and it gives no help finding one.
+      - The declaration is honored on its CONTENT plus one cheap structural bar
+        (the declaring row must itself carry a `chain`, i.e. have come through
+        `append()`), NOT on that chain having been verified -- the excusal
+        decision is made in a pre-scan, before the walk that would judge it. A
+        hand-written declaration whose own chain value is bogus still excuses,
+        and is then reported as a break in its own right at its own line. That is
+        a real hole, and it is the same hole as the first bullet.
+      - `resume_prev` is taken on trust, but a wrong value fails the very next
+        row, so it cannot launder a rewritten tail without showing up at once.
+
+    Args:
+      orphan_line: 1-based line number in the file, exactly as `verify()` reports
+        it (rows are split on newline; see `verify_file`).
+      why: a non-empty human reason. Blank is refused -- an unexplained
+        declaration is not a declaration, it is a mute exemption.
+      resume_prev: for an UNCHAINED orphan, the chain value the writer resumed
+        from. Omit it and the walk resumes from genesis, which is the honest
+        answer when the resume point is genuinely unknown (the following row then
+        fails, and that failure is true).
+
+    Returns the appended row.
+    """
+    if not isinstance(why, str) or not why.strip():
+        raise ValueError("declare_break needs a non-empty `why`: an unexplained "
+                         "declaration excuses a break without naming it, which is "
+                         "the thing this function exists to refuse")
+    if not isinstance(orphan_line, int) or isinstance(orphan_line, bool):
+        raise ValueError(f"orphan_line must be an int line number, got {orphan_line!r}")
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").split("\n")
+    except OSError as e:
+        raise ValueError(f"cannot read {path}: {e}") from e
+    if not (1 <= orphan_line <= len(lines)):
+        raise ValueError(f"line {orphan_line} is not in {path}")
+    raw = lines[orphan_line - 1].strip()
+    if not raw:
+        raise ValueError(f"line {orphan_line} of {path} is blank; nothing to pin")
+    row: dict[str, Any] = {
+        "op": _DECLARE_OP,
+        "orphan_line": orphan_line,
+        # sha256 of the STRIPPED line, the same string `verify_file` hashes. Full
+        # 64 hex chars, not the chain's truncated 32: this is a content pin and
+        # there is no chaining cost to paying for the whole digest here.
+        "orphan_sha256": hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest(),
+        "why": why.strip(),
+    }
+    if resume_prev is not None:
+        if not isinstance(resume_prev, str):
+            raise ValueError(f"resume_prev must be a chain string, got {resume_prev!r}")
+        row["resume_prev"] = resume_prev
+    chain = Ledger(path).append(row, authority=authority)
+    row["chain"] = chain
+    return row
+
+
+def _scan_declarations(lines: list[str]) -> dict[int, dict]:
+    """Pre-scan for `chain_break_declared` rows, keyed by the line each excuses.
+
+    Two bars, both cheap, neither cryptographic (see `declare_break`'s defect
+    list). A row must (a) be a well-formed declaration -- the op, an int
+    `orphan_line`, a 64-hex `orphan_sha256`, a non-empty `why` -- and (b) carry a
+    `chain` field, i.e. have come through `append()` rather than being echoed
+    into the file by hand. (b) does not check that the chain VERIFIES; that
+    verdict belongs to the walk this scan runs before. It only means a raw
+    unchained line cannot hand out exemptions.
+
+    Last declaration for a line wins, so a later corrected declaration supersedes
+    an earlier one without anybody editing a row.
+    """
+    found: dict[int, dict] = {}
+    for raw in lines:
+        raw = raw.strip()
+        if not raw or _DECLARE_OP not in raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or d.get("op") != _DECLARE_OP:
+            continue
+        line_no = d.get("orphan_line")
+        sha = d.get("orphan_sha256")
+        why = d.get("why")
+        if (isinstance(line_no, int) and not isinstance(line_no, bool)
+                and isinstance(sha, str) and len(sha) == 64
+                and isinstance(why, str) and why.strip()
+                and isinstance(d.get("chain"), str)):
+            found[line_no] = d
+    return found
+
+
+def _excused(declared: dict[int, dict], line_no: int, raw: str) -> dict | None:
+    """The declaration covering this line IF it pins these exact bytes, else None.
+
+    The sha comparison is the whole guarantee: a declaration excuses the content
+    it named and nothing else. Edit the orphan afterwards, or forge the sha, and
+    this returns None and the break is reported like any other.
+    """
+    d = declared.get(line_no)
+    if d is None:
+        return None
+    got = hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+    return d if d.get("orphan_sha256") == got else None
+
+
 def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
     """Recompute the chain over a file; report the first break by line number.
 
@@ -545,6 +714,35 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
                 Falsy. Not a green: the verifier cannot distinguish real legacy
                 history from a fabricated prepend, so it does not claim to.
       ok=False — a break was found (scope still says what was scanned).
+
+    DECLARED BREAKS (0.6.0). A break that a `chain_break_declared` row names and
+    pins (see `declare_break`) is not counted in `breaks` and does not turn the
+    verdict red. It is counted in `declared_breaks`, described in `declared`, and
+    the verdict becomes ok=None / verified_scope="bounded_declared_break" -- never
+    True. The reason it cannot mint a green is this module's own standing rule,
+    written for the prechain case in 0.5.7 and applying unchanged here: only a
+    scan that CHECKED EVERY ROW returns True. An excused row was not checked; the
+    chain does not link across it, and what stands in for the link is a human
+    sentence. A declaration converts an unexplained red into a named, bounded
+    null. That is the whole of what it does, and it is enough.
+
+    Only two break classes are declarable, both being the signature of an
+    out-of-band append: an unchained row after the chain began, and a chain
+    mismatch. Unparseable lines, non-object lines, non-string chain values and
+    unhashable rows are NOT declarable -- those are malformed bytes, not a
+    recorded event somebody wrote outside the tool, and there is nothing there to
+    stand behind.
+
+    DECLARATIONS ARE IGNORED ENTIRELY IN STRICT MODE, deliberately. Strict exists
+    for the caller who wants no tolerance at all -- it already refuses prechain
+    rows that non-strict accepts as legitimate history. A declaration is an
+    unverified human claim (`declare_break` says so in its own docstring), and
+    honoring an unverified claim is precisely the tolerance strict was asked to
+    drop. So `verify(strict=True)` reports a declared break as a break, in
+    `breaks` and in `first_break`, exactly as it did before this feature existed:
+    adding declarations must not make any strict verdict newly greener, and it
+    does not. The declaration rows are still reported in `declared` under strict
+    so the mode difference is visible rather than silent.
 
     `strict=True` closes the fabricated-legacy-prepend hole harder: it treats
     ANY unchained row as a break, so prepended fake "legacy" rows in front of a
@@ -568,6 +766,13 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
         lines = Path(path).read_text(encoding="utf-8", errors="replace").split("\n")
     except OSError as e:
         return VerifyResult(ok=False, first_break=f"unreadable: {e}", breaks=1)
+    # Declarations are read in a pass of their own, because a declaration lives
+    # AFTER the break it names (the file is append-only; there is no other place
+    # to put it) and the walk below needs the answer when it reaches the orphan.
+    # Read `declare_break`'s defect list for what this does and does not buy --
+    # in particular, that it buys nothing at all against someone with write
+    # access, and is not offered as if it did.
+    declared = _scan_declarations(lines)
     prev = _GENESIS
     for i, raw in enumerate(lines, 1):
         raw = raw.strip()
@@ -593,9 +798,34 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
         claimed = obj.pop("chain", None)
         if claimed is None:
             if res.chained:
+                # The out-of-band-append signature, and the first of the two
+                # declarable break classes.
+                d = None if strict else _excused(declared, i, raw)
+                if d is not None:
+                    res.declared_breaks += 1
+                    res.declared.append(
+                        f"line {i}: declared break ({d['why']})")
+                    # Resume from the value the writer says the record resumed
+                    # from. Absent, resume from genesis: an unknown resume point
+                    # is stated as unknown, and the next row's failure is true.
+                    # A WRONG resume_prev fails the very next row, so this
+                    # cannot launder a rewritten tail.
+                    rp = d.get("resume_prev")
+                    prev = rp if isinstance(rp, str) and rp else _GENESIS
+                    continue
                 res.ok = False
                 res.breaks += 1
-                res.first_break = res.first_break or f"line {i}: unchained row after chain began"
+                if not strict and declared.get(i) is not None:
+                    # A declaration exists for this line and does not match these
+                    # bytes. Say that, rather than the bare "unchained row": the
+                    # difference between "nobody explained this" and "somebody
+                    # explained this and then the bytes moved" is the whole point
+                    # of pinning the content.
+                    res.first_break = res.first_break or (
+                        f"line {i}: unchained row after chain began; a declaration "
+                        f"exists but its orphan_sha256 does not match these bytes")
+                else:
+                    res.first_break = res.first_break or f"line {i}: unchained row after chain began"
             elif strict:
                 # A prechain (unchained-before-chain) row. Tolerated by default as
                 # legacy history; in strict mode it is a break, so a fabricated
@@ -642,9 +872,24 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
             res.chained += 1
             continue
         if claimed != want:
-            res.ok = False
-            res.breaks += 1
-            res.first_break = res.first_break or f"line {i}: chain mismatch"
+            # Second declarable class: a row carrying a chain value that verifies
+            # against nothing (hand-written, or edited after append). `prev` still
+            # advances to `claimed` below, exactly as on the undeclared path, so
+            # `resume_prev` plays no part here -- the file itself already says
+            # where it resumed.
+            d = None if strict else _excused(declared, i, raw)
+            if d is not None:
+                res.declared_breaks += 1
+                res.declared.append(f"line {i}: declared break ({d['why']})")
+            else:
+                res.ok = False
+                res.breaks += 1
+                if not strict and declared.get(i) is not None:
+                    res.first_break = res.first_break or (
+                        f"line {i}: chain mismatch; a declaration exists but its "
+                        f"orphan_sha256 does not match these bytes")
+                else:
+                    res.first_break = res.first_break or f"line {i}: chain mismatch"
         prev = claimed
         res.chained += 1
     # Scope stamping (0.5.7). In non-strict mode, skipped prechain rows bound
@@ -653,8 +898,18 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
     # ("verified within scope"), so the fabricated-legacy-prepend can no longer
     # ride a bare True past a consumer that reads only `ok`. Strict mode never
     # skips (prechain rows are breaks there), so its scope is always "full".
-    if not strict and res.prechain:
-        res.verified_scope = "bounded_prechain_skipped"
+    #
+    # A declared break bounds the verdict the same way, for the same reason: the
+    # chain was not checked across that row. `declared_breaks` rides in-band next
+    # to it, and `declared` names each one, so the hole is described and not
+    # merely counted.
+    if not strict and (res.prechain or res.declared_breaks):
+        if res.prechain and res.declared_breaks:
+            res.verified_scope = "bounded_prechain_skipped+declared_break"
+        elif res.prechain:
+            res.verified_scope = "bounded_prechain_skipped"
+        else:
+            res.verified_scope = "bounded_declared_break"
         if res.ok:
             res.ok = None
     elif res.rows == 0 and res.ok:
@@ -677,6 +932,14 @@ def verify_file(path: str | Path, *, strict: bool = False) -> VerifyResult:
         # evidence, and those must not print the same.
         res.ok = None
         res.verified_scope = "empty"
+    if strict and declared:
+        # Strict honored none of these. List them anyway: a mode that silently
+        # drops the explanations makes the two modes disagree for reasons the
+        # reader cannot see. `declared_breaks` stays 0 under strict, because
+        # nothing was excused.
+        res.declared.extend(
+            f"line {n}: declaration present, NOT honored (strict mode) ({d['why']})"
+            for n, d in sorted(declared.items()))
     return res
 
 

@@ -217,6 +217,48 @@ upstream) if it also needs to distinguish "never existed" from "exists,
 legitimately empty" — `ok` alone collapses that distinction into two different
 answers, not one.
 
+### When the log was written out of band: declare the break, don't re-forge it
+
+Sooner or later something writes to your JSONL without going through `append()` —
+a script, an incident, a person with an editor. The chain breaks there and stays
+broken, because that is the true record. Your two obvious options are both bad:
+live with a permanent red that tells a reader nothing, or recompute the chain so
+the file goes green — which is forging it, and a chain you can silently re-forge
+is not evidence of anything.
+
+`declare_break` is the third option. It **appends** a row naming the break:
+
+```python
+from arcaeon_ledger import declare_break, verify_file
+
+declare_break("agent.log.jsonl", 25,
+              "Written out of band 2026-08-15 by a session hand-appending JSON "
+              "instead of calling append(). Content is true and preserved verbatim; "
+              "no chain value was ever computed for it, so none can honestly be supplied.")
+
+r = verify_file("agent.log.jsonl")
+r.ok               # None  — bounded, NOT True. Falsy.
+r.verified_scope   # "bounded_declared_break"
+r.breaks           # 0
+r.declared         # ["line 25: declared break (Written out of band 2026-08-15 ...)"]
+```
+
+The break stays a break, forever, in `declared`. What changes is that a known,
+explained break stops masquerading as an unexplained one — and the orphan's exact
+bytes are pinned by sha256, so editing that line afterwards turns the file red
+again. **It never returns `ok=True`.** Only a scan that checked every row does
+that, and an excused row was not checked. `verify(strict=True)` ignores
+declarations entirely.
+
+**What this does not do, said plainly: it is a record device, not a
+cryptographic one.** Anyone who can write the file can write a declaration, so it
+raises no bar at all against an attacker who already has write access. It defends
+against *forgetting*, not against tampering. It cannot tell an honest out-of-band
+append from a malicious one — `why` is an unverified human sentence. And it can
+only declare breaks `verify()` already found; it does nothing about breaks nobody
+noticed. Use it to keep an honest incident legible, never as a way to make a
+ledger green.
+
 ## Bind what the agent actually read (artefact-binding)
 
 The chain proves a row wasn't edited. It does **not** prove the row was ever *true* —

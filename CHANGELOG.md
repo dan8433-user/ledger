@@ -1,6 +1,89 @@
 # Changelog
 
-## Unreleased (staged for 0.5.10) — a witness never goes backward, and the docs stop contradicting themselves
+## 0.6.0 — 2026-08-28 — declare a break instead of hiding it
+
+A hash-chained log written out of band is broken forever, and that is correct:
+the break is the true record. Until now the only two things you could do with one
+were live with a permanent red or recompute the chain so the file verified again
+— and the second is forging, in a package whose entire argument is that a chain
+you can silently re-forge is not evidence of anything.
+
+**`declare_break(path, orphan_line, why, resume_prev=...)`** is the third option
+and the only sanctioned repair. It APPENDS (never edits) a row naming the break:
+which line, the orphan's exact bytes pinned by a full sha256, a human reason, a
+date, and the chain value the record resumed from.
+
+**The break stays a break.** `verify()` reports it forever in `declared` (one
+sentence per excused break, reason included) and counts it in `declared_breaks`,
+which is deliberately NOT folded into `breaks`. What changes is only that a
+known, explained, content-pinned break stops masquerading as an unexplained one.
+
+**It cannot mint a green, and that is the load-bearing design decision.** A
+declared break yields `ok=None` with `verified_scope="bounded_declared_break"` —
+falsy — not `ok=True`. This is the module's own standing rule from 0.5.7 applied
+unchanged: only a scan that CHECKED EVERY ROW returns True. An excused row was
+not checked; the chain does not link across it, and what stands in for the link
+is a human sentence. Declaring converts an unexplained red into a named, bounded
+null. That is the whole of what it does, and it is enough. (Where both apply, the
+scope reads `bounded_prechain_skipped+declared_break`.)
+
+**A declaration excuses the exact bytes it pinned and nothing else.** Edit the
+orphan afterwards and the sha stops matching and the file goes red again, with a
+first_break that says so specifically ("a declaration exists but its
+orphan_sha256 does not match these bytes") rather than the generic message — the
+difference between "nobody explained this" and "somebody explained this and then
+the bytes moved" is the entire point of pinning content. A forged
+`orphan_sha256`, a declaration pointing at the wrong line, and a declaration with
+a blank `why` all excuse nothing. Only two break classes are declarable at all —
+an unchained row after the chain began, and a chain mismatch, the two signatures
+of an out-of-band append. Unparseable lines, non-object lines, non-string chain
+values and unhashable rows are not declarable: those are malformed bytes, not a
+recorded event somebody wrote outside the tool, and there is nothing there to
+stand behind.
+
+**`strict=True` ignores declarations entirely.** Strict exists for the caller who
+wants no tolerance at all — it already refuses the prechain rows non-strict
+accepts as legitimate history. A declaration is an unverified human claim, and
+honoring an unverified claim is precisely the tolerance strict was asked to drop.
+So strict reports a declared break as a break, in `breaks` and `first_break`,
+exactly as before this feature existed: **no strict verdict anywhere gets newly
+greener because declarations were added.** Strict also refuses the `resume_prev`
+pointer that comes with the declaration, not just the excusal — a mode that
+declined the exemption while quietly accepting the pointer would be honoring half
+of a claim it had just rejected. Strict does still LIST what it refused
+(`"declaration present, NOT honored (strict mode)"`), so the gap between the two
+modes is visible rather than silent.
+
+**HONEST LIMITS, stated in the function's own docstring and not only here**,
+because understating a tool's limits in its own docs is the failure this package
+exists to argue against:
+
+- It is a **record device, not a cryptographic one.** Anyone who can write the
+  file can write a declaration, so it raises **no** bar against an attacker who
+  already has write access. **It defends against forgetting, not against
+  tampering.** Every limit below is one more face of this single fact.
+- It cannot tell an honest out-of-band append from a malicious one. `why` is an
+  unverified human claim; nothing checks it, and nothing can.
+- It only declares breaks `verify()` **already found**. It does nothing about a
+  break nobody noticed, and gives no help finding one.
+- Honoring is decided in a pre-scan, so the declaring row is checked for one
+  cheap structural bar (it must carry a `chain`, i.e. have come through
+  `append()` — a raw hand-echoed line hands out no exemptions) but NOT for that
+  chain verifying. A hand-written declaration with a bogus chain still excuses,
+  and is then reported as a break in its own right at its own line.
+- `resume_prev` is taken on trust, but a wrong value fails the very next row, so
+  it cannot launder a rewritten tail without showing up immediately.
+
+**Mutation-verified**, four mutants, each watched failing before the tests were
+kept: dropping the `orphan_sha256` comparison (2 tests red), honoring
+declarations under strict (1 red, and it minted `ok=True` on a broken log — the
+exact regression property 6 forbids), letting a declared break mint a green
+instead of a bounded null (6 red), and dropping the must-be-chained bar on the
+declaring row (1 red). `test_declared_breaks.py`, 20 tests.
+
+Also ships the items below, previously staged as 0.5.10 and never published.
+
+## Also in 0.6.0 (was staged as 0.5.10, never published) — a witness never goes backward, and the docs stop contradicting themselves
 
 - **C3 monotonic guard.** `WitnessStore.record()` now refuses a pin whose
   `rows` is below the namespace's history high-water mark, with the same
