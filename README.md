@@ -397,22 +397,47 @@ etc.) can give its agent tamper-evident logging with no code. Wire it in:
 }
 ```
 
-The agent then has two tools: `ledger_append(record)` to log an action
-(returns its chain hash) and `ledger_verify(strict?)` to prove the log is
-intact (or get the exact tampered line back). The verify verdict is
-three-valued, same as the library: `ok: true` = every row verified,
-`ok: null` = chain intact but unchained `prechain` rows were skipped
-unverified (`verified_scope: "bounded_prechain_skipped"` — not a green),
-`ok: false` = broken. Pass `strict: true` to make any unchained row a hard
-failure. MCP is JSON-RPC over stdio and this server speaks it directly — no
-SDK, no extra install.
+The agent then has five tools. Two are **operator tools** over one file:
+`ledger_append(record)` to log an action (returns its chain hash) and
+`ledger_verify(strict?)` to prove the log is intact (or get the exact tampered
+line back). The verify verdict is three-valued, same as the library:
+`ok: true` = every row verified, `ok: null` = chain intact but unchained
+`prechain` rows were skipped unverified
+(`verified_scope: "bounded_prechain_skipped"` — not a green), `ok: false` =
+broken. Pass `strict: true` to make any unchained row a hard failure.
+
+Three are **agent tools** (0.7.0), for when the output is going to somebody —
+a principal who wants proof, or a peer deciding whether to trust you:
+
+| tool | for | returns |
+| --- | --- | --- |
+| `prove_my_conduct(namespace, events)` | log a batch of what you just did and hand your principal one hash | `{rows, head_hash, chain_verified}` |
+| `verify_peer_ledger(jsonl_text, strict?)` | judge another agent's exported log from its text alone | `{ok, rows, first_break, declared_breaks}` |
+| `declare_break(namespace, reason)` | your log broke — name it instead of re-minting a chain | `{declared_line, declared_breaks, ...}` |
+
+`prove_my_conduct` re-verifies after appending, so an agent whose ledger has
+been tampered with gets `chain_verified: false` rather than a head hash with a
+green attached. `verify_peer_ledger` returns `first_break` as an **integer line
+number** (or null) so a calling agent can point at the exact bad row — it never
+writes to your filesystem, and an export with no parseable rows returns
+`ok: null` (`"bounded_empty"`), because a green for sending nothing is the
+cheapest possible forgery. `declare_break` refuses when nothing is broken, and
+never restores a green.
+
+Agent ledgers live one file per namespace under `--ns-dir` (default `ledgers/`
+beside `--log`). A namespace is a name, not a path: `[A-Za-z0-9._-]`, traversal
+refused rather than sanitized.
+
+MCP is JSON-RPC over stdio and this server speaks it directly — no SDK, no
+extra install.
 
 ## Status
 
 Core library, CLI, and a drop-in **MCP server**, all tested: the library
 against edit / delete / reorder tampering (`test_ledger.py`), the MCP server
 through a full initialize → tools/list → append → verify handshake including
-tamper detection over the wire. Extracted from a hash-chained action ledger
+tamper detection over the wire, and the agent tools against namespace traversal,
+peer-export tampering by exact line, and declared breaks (`test_agent_tools.py`). Extracted from a hash-chained action ledger
 running in production. External anchoring ships via `head()` (publish the pin
 yourself) and the reference witness (`WitnessStore`, above); a hosted witness
 tier (retention, automatic pin cadence, compliance export) is the next layer.

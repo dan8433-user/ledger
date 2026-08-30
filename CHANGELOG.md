@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.7.0 — 2026-08-30 — three agent-facing MCP tools
+
+The MCP server's first two tools are OPERATOR tools: append a row, verify a file.
+They assume the caller owns the file and reads the result itself. These three
+assume something else — that the caller is an agent, and that the output is going
+somewhere: to a principal who wants proof, or to a peer who wants to be trusted.
+Same machinery, shaped for the conversation it actually shows up in. No new
+dependencies; the server still speaks JSON-RPC over stdio directly.
+
+**`prove_my_conduct(namespace, events)` → `{rows, head_hash, chain_verified}`.**
+An agent logs a batch of what it just did and gets back ONE chain head it can
+hand its principal. `head_hash` is read back off the file after the appends, not
+computed for the reply, and `chain_verified` is the verifier's own three-valued
+verdict over the agent's own log — so an agent whose ledger has been tampered
+with cannot hand out a head hash with a green attached to it. That is the failure
+this tool exists to sell against, and reporting the appends as successful without
+re-verifying would have walked straight into it.
+
+**`verify_peer_ledger(jsonl_text, strict?)` → `{ok, rows, first_break,
+declared_breaks}`.** Judge another agent's exported ledger from its TEXT alone —
+no access to their machine, no writes on yours (asserted: the caller's own log is
+byte-identical afterwards). `first_break` is an INTEGER LINE NUMBER rather than
+the library's human string, because a calling agent needs to point at the row,
+not parse a sentence; the sentence still rides along in `first_break_detail`. The
+text is verified by writing it to a throwaway temp file and calling `verify_file`
+— deliberately, because a second verifier that walked the string directly is a
+second verifier that can disagree with the first, and the day they disagree is
+the day the tool lies.
+
+**`declare_break(namespace, reason)` → `{declared_line, declared_breaks, ...}`.**
+The 0.6.0 repair, wrapped for an agent that does not know its own line numbers:
+it runs verification, takes the first break the verifier ALREADY found, and pins
+that line. If nothing is broken it REFUSES — declaring a break that verification
+did not find would put a false sentence into an append-only record, which is
+worse than the silence it replaces. It declares one break at a time, so a second
+break can never ride in on one sentence, and it never restores a green: the
+verdict stays `ok=None` / `bounded_declared_break` with the break counted forever.
+
+**Two honesty rules extended to the new surface.** An export with no parseable
+rows now returns `ok=None` / `verified_scope="bounded_empty"` instead of the
+vacuous `true` a zero-row scan would otherwise earn — handing a peer a green for
+sending nothing is the cheapest possible forgery, and it is the same standing
+rule as prechain and declared breaks: only a scan that checked something returns
+True. And every new verdict carries `verified_scope`, `prechain` and `declared`
+alongside `ok`, so a client that reads `ok` alone still gets null on a bounded
+scan rather than a false pass.
+
+**Namespaces are names, not paths.** Agent ledgers live one file per namespace
+under `--ns-dir` (default `ledgers/` beside `--log`). A namespace must match
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; anything path-shaped is REFUSED rather than
+sanitized, with a containment check behind the regex as a belt. Silently
+rewriting `../etc/passwd` into `etcpasswd` would create a real ledger under a
+name the caller never asked for, and the caller would then hand out a head hash
+for a file it can no longer find.
+
+`handle(msg, log)` keeps its 0.6.0 two-argument signature; `ns_dir` is an
+optional keyword defaulting to `ledgers/` beside the server's log, so existing
+call sites and the 0.6.0 integration tests are untouched.
+
+40 new tests in `test_agent_tools.py`, all watched failing before the
+implementation existed (40 failed → 40 passed); the existing 309 stayed green.
+
 ## 0.6.0 — 2026-08-28 — declare a break instead of hiding it
 
 A hash-chained log written out of band is broken forever, and that is correct:

@@ -90,7 +90,7 @@ try:                      # Windows byte-range locks
 except ImportError:       # pragma: no cover - platform dependent
     _msvcrt = None
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 __all__ = ["LedgerWriteError", "Ledger", "VerifyResult", "verify_file", "chain_at", "authority", "Head",
            "declare_break",
            "bind_artefact", "verify_artefact", "digest_bytes", "digest_json",
