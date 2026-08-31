@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **CI (2026-08-30):** added Python 3.13 as a third matrix point in
+  `.github/workflows/test.yml` (was `["3.9", "3.12"]`, now
+  `["3.9", "3.12", "3.13"]`) — buys coverage of the current stable release
+  instead of stopping one behind it. The matrix comment's cost note (previously
+  "two points … 4-5 point matrix on repos this small") is updated to describe
+  three points, honestly, in-file.
 - **Test-only fix:** `test_export_bundle_does_not_crash_on_a_corrupted_witness_file`
   imported `arcaeon_audit` unconditionally, which broke CI collection on the
   single-package runner (first red run: ca5c983, 2026-08-30 — arcaeon-audit

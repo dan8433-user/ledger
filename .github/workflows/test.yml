@@ -40,10 +40,12 @@ jobs:
       fail-fast: false
       matrix:
         # Matches requires-python = ">=3.9" declared across every arcaeon-* pyproject.toml.
-        # Two points (oldest + newest supported) catch syntax/stdlib drift at both ends
-        # without paying for a 4-5 point matrix on repos this small — see cost estimate in
-        # the runbook for why this is deliberately narrow.
-        python-version: ["3.9", "3.12"]
+        # Three points now: oldest supported (3.9), prior-stable (3.12), and newest-stable
+        # (3.13, added 2026-08-30) — the third point buys coverage of the current stable
+        # release instead of stopping one behind it, still well short of a 4-5 point matrix
+        # on repos this small. See cost estimate in the runbook (now stale at "two points";
+        # three points is a ~50% bump in per-run job count, still cheap at this repo size).
+        python-version: ["3.9", "3.12", "3.13"]
 
     steps:
       - name: Checkout
