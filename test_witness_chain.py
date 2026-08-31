@@ -559,7 +559,17 @@ def test_history_tolerates_a_non_utf8_byte_in_the_pin_file(tmp_path):
 def test_export_bundle_does_not_crash_on_a_corrupted_witness_file(tmp_path):
     """The end-to-end case: export must produce a verdict, not a traceback, over
     a damaged witness -- exactly the principle this fix restores."""
-    from arcaeon_audit import export_bundle
+    # Cross-package guard test. arcaeon-audit DEPENDS ON arcaeon-ledger, so audit
+    # can never be declared as a dependency here (circular); on the single-package
+    # CI env it is absent. Skip LOUDLY rather than fail collection -- the test still
+    # runs everywhere the full line is installed (dev machines, smoke_from_dist),
+    # and the skip reason is visible in the pytest summary, not silent.
+    import pytest
+    export_bundle = pytest.importorskip(
+        "arcaeon_audit",
+        reason="cross-package test: arcaeon-audit not installed (circular dep, "
+               "cannot be declared); runs wherever the full arcaeon line is present",
+    ).export_bundle
     import json as _json
 
     log = tmp_path / "a.jsonl"

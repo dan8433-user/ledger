@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Test-only fix:** `test_export_bundle_does_not_crash_on_a_corrupted_witness_file`
+  imported `arcaeon_audit` unconditionally, which broke CI collection on the
+  single-package runner (first red run: ca5c983, 2026-08-30 — arcaeon-audit
+  depends on this package, so the dep is circular and can never be declared).
+  Now a loud `pytest.importorskip` with the reason in the skip summary; the test
+  still runs everywhere the full line is installed. No shipped code changed;
+  the published 0.7.0 wheel is unaffected.
+
+
 ## 0.7.0 — 2026-08-30 — three agent-facing MCP tools
 
 The MCP server's first two tools are OPERATOR tools: append a row, verify a file.
