@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased addition — 2026-08-30 (night): fallback verifier no longer greens an empty seam log
+## 0.7.1 — 2026-08-31: adapter fallback verifier no longer greens an empty seam log
 
 The vendored adapter's FALLBACK verify path (used only when arcaeon-ledger
 is not installed — the no-dependency deployment the shim exists to serve)
