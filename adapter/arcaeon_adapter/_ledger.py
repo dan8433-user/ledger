@@ -180,18 +180,35 @@ def open_ledger(path: str | Path):
 # -- verification ------------------------------------------------------------
 
 class _FallbackVerify:
-    """The three fields a caller actually reads off a verdict."""
+    """The fields a caller reads off a verdict, three-valued like the library's.
 
-    def __init__(self, ok, rows, first_break):
+    `ok` is deliberately tri-state and MUST be read with `is True`:
+
+      * ``True``  + ``verified_scope="full"``  every row was walked, none broke
+      * ``None``  + ``verified_scope="empty"`` nothing was checked, so nothing is
+        claimed. Falsy on purpose. An empty seam log is this package's own
+        signature failure (proxy up, observer silent), and answering that with a
+        green is indistinguishable from "I checked everything and it was fine."
+      * ``False``                              a real fault; see `breaks`
+
+    `breaks` is the total count, not a flag. `first_break` alone teaches its
+    reader there is exactly one fault, which is how a second one goes
+    unlooked-for.
+    """
+
+    def __init__(self, ok, rows, first_break, breaks=0, verified_scope="full"):
         self.ok = ok
         self.rows = rows
         self.first_break = first_break
+        self.breaks = breaks
+        self.verified_scope = verified_scope
 
     def __bool__(self) -> bool:
         return self.ok is True
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
         return (f"FallbackVerify(ok={self.ok!r}, rows={self.rows}, "
+                f"breaks={self.breaks}, verified_scope={self.verified_scope!r}, "
                 f"first_break={self.first_break!r})")
 
 
@@ -209,11 +226,13 @@ def verify_seam_log(path: str | Path):
         return _real_verify_file(Path(path))
     prev = _GENESIS
     rows = 0
+    breaks = 0
     first_break = None
     try:
         raw_text = Path(path).read_text(encoding="utf-8")
     except OSError as e:
-        return _FallbackVerify(False, 0, f"unreadable: {e}")
+        return _FallbackVerify(False, 0, f"unreadable: {e}",
+                               verified_scope="unreadable")
     for i, raw in enumerate(raw_text.split("\n"), start=1):
         if not raw.strip():
             continue
@@ -221,11 +240,20 @@ def verify_seam_log(path: str | Path):
         try:
             obj = json.loads(raw)
         except ValueError:
+            breaks += 1
             if first_break is None:
                 first_break = f"line {i}: unparseable"
             continue
         claimed = obj.get("chain")
-        if _chain(prev, obj) != claimed and first_break is None:
-            first_break = f"line {i}: chain mismatch"
+        if _chain(prev, obj) != claimed:
+            breaks += 1
+            if first_break is None:
+                first_break = f"line {i}: chain mismatch"
         prev = claimed or prev
-    return _FallbackVerify(first_break is None, rows, first_break)
+    if rows == 0:
+        # Nothing was walked, so nothing is asserted. ok=None is falsy on
+        # purpose and mirrors arcaeon_ledger.verify_file's "empty" scope: a
+        # scan that checked no rows has not earned a green.
+        return _FallbackVerify(None, 0, None, breaks=0, verified_scope="empty")
+    return _FallbackVerify(breaks == 0, rows, first_break, breaks=breaks,
+                           verified_scope="full")

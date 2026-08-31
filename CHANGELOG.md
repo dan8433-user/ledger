@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased addition — 2026-08-30 (night): fallback verifier no longer greens an empty seam log
+
+The vendored adapter's FALLBACK verify path (used only when arcaeon-ledger
+is not installed — the no-dependency deployment the shim exists to serve)
+returned ok=True over an EMPTY seam log, and stopped counting after the
+first chain break. Found by our own verdict-field enumeration (2026-08-30);
+the fix (tri-state ok, breaks count, verified_scope) had existed in the
+standalone arcaeon-adapter repo for four days, unvendored. Vendored forward
+tonight; test_adapter_fallback_verify.py pins both behaviors on the forced
+fallback path, observed RED on the old code before GREEN on the fix. With
+arcaeon-ledger installed the real three-valued verifier was always used and
+was never wrong — the blast radius was the ledger-less install, stated
+precisely rather than dramatically.
+
 ## Unreleased
 
 - **CI (2026-08-30):** added Python 3.13 as a third matrix point in
